@@ -127,12 +127,21 @@ func (s *StartableToolSet) Start(ctx context.Context) (err error) {
 	// fires when the toolset has work to do (Restartable on a
 	// recovering run, or Startable on a cold start); cheap
 	// toolsets without either skip the span entirely.
+	//
+	// Unwrap once so the kind attribute names the underlying toolset
+	// (e.g. *mcp.Toolset, *builtin.ShellTool) instead of the
+	// *tools.namedToolSet wrapper that every toolset gets in the
+	// registry — same pattern DescribeToolSet uses.
+	inner := s.ToolSet
+	if u, ok := inner.(Unwrapper); ok {
+		inner = u.Unwrap()
+	}
 	if restarter, hasRestarter := As[Restartable](s.ToolSet); recovering && hasRestarter {
 		ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools").Start(
 			ctx,
 			"toolset.start",
 			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(attribute.String("cagent.toolset.kind", fmt.Sprintf("%T", s.ToolSet))),
+			trace.WithAttributes(attribute.String("cagent.toolset.kind", fmt.Sprintf("%T", inner))),
 		)
 		defer func() {
 			if err != nil {
@@ -150,7 +159,7 @@ func (s *StartableToolSet) Start(ctx context.Context) (err error) {
 			ctx,
 			"toolset.start",
 			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(attribute.String("cagent.toolset.kind", fmt.Sprintf("%T", s.ToolSet))),
+			trace.WithAttributes(attribute.String("cagent.toolset.kind", fmt.Sprintf("%T", inner))),
 		)
 		defer func() {
 			if err != nil {
