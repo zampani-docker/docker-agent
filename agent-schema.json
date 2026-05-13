@@ -595,7 +595,7 @@
     },
     "CommandConfig": {
       "type": "object",
-      "description": "Advanced command configuration with description and instruction",
+      "description": "Advanced command configuration. Set 'instruction' to send a prompt to the current agent. Set 'agent' to switch the active agent to a sub-agent (e.g. /plan -> the 'planner' sub-agent). Both fields can be combined: the agent is switched first, then the instruction is sent to the new agent.",
       "properties": {
         "description": {
           "type": "string",
@@ -604,6 +604,10 @@
         "instruction": {
           "type": "string",
           "description": "The prompt sent to the agent. Supports bang commands (!`command`) and positional arguments ($1, $2, etc.)"
+        },
+        "agent": {
+          "type": "string",
+          "description": "Name of a sub-agent to switch to when this command is invoked. The agent must be reachable from the current agent's sub-agent graph. When set without 'instruction', any text typed after the slash command is forwarded as a prompt to the target agent."
         }
       },
       "additionalProperties": false

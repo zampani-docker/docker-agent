@@ -301,6 +301,15 @@ func (a *App) ResolveCommand(ctx context.Context, userInput string) string {
 	return runtime.ResolveCommand(ctx, a.runtime, userInput)
 }
 
+// LookupCommand parses userInput as a /command invocation and returns the
+// matching command, the trailing arguments, and whether a match was found.
+// Callers that want to act on command metadata (for example switching to a
+// sub-agent declared via the `agent:` field) should call this before
+// ResolveCommand to inspect the raw command.
+func (a *App) LookupCommand(ctx context.Context, userInput string) (types.Command, string, bool) {
+	return runtime.LookupCommand(ctx, a.runtime, userInput)
+}
+
 // EmitStartupInfo emits initial agent, team, and toolset information to the provided channel
 func (a *App) EmitStartupInfo(ctx context.Context, events chan runtime.Event) {
 	a.runtime.EmitStartupInfo(ctx, a.session, runtime.NewChannelSink(events))
