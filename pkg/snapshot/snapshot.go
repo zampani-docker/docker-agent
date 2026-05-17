@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -52,8 +53,7 @@ type revertOp struct {
 // Manager opens per-worktree shadow repositories under a data directory.
 type Manager struct {
 	dataDir string
-	mu      sync.Mutex
-	locks   map[string]*sync.Mutex
+	locks   *concurrent.Map[string, *sync.Mutex]
 }
 
 // NewManager creates a snapshot manager rooted at dataDir.
@@ -61,7 +61,7 @@ func NewManager(dataDir string) *Manager {
 	if dataDir == "" {
 		dataDir = paths.GetDataDir()
 	}
-	return &Manager{dataDir: dataDir, locks: map[string]*sync.Mutex{}}
+	return &Manager{dataDir: dataDir, locks: concurrent.NewMap[string, *sync.Mutex]()}
 }
 
 // Open returns the shadow repository for the git worktree containing dir.
@@ -96,14 +96,8 @@ func (m *Manager) Cleanup(ctx context.Context, dir string) error {
 }
 
 func (m *Manager) lock(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if l := m.locks[key]; l != nil {
-		return l
-	}
-	l := &sync.Mutex{}
-	m.locks[key] = l
-	return l
+	lock, _ := m.locks.LoadOrStore(key, &sync.Mutex{})
+	return lock
 }
 
 // Repo is a shadow git repository paired with a source worktree.

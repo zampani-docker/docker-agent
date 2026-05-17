@@ -48,6 +48,32 @@ func (m *Map[K, V]) Length() int {
 	return len(m.values)
 }
 
+// LoadOrStore returns the existing value for key if present; otherwise it
+// stores and returns value. The loaded result is true if the value was
+// loaded, false if stored.
+func (m *Map[K, V]) LoadOrStore(key K, value V) (V, bool) {
+	m.mu.RLock()
+	if existing, ok := m.values[key]; ok {
+		m.mu.RUnlock()
+		return existing, true
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Re-check under the write lock: another goroutine may have stored
+	// the key between releasing the read lock and acquiring the write lock.
+	if existing, ok := m.values[key]; ok {
+		return existing, true
+	}
+	if m.values == nil {
+		m.values = make(map[K]V)
+	}
+	m.values[key] = value
+	return value, false
+}
+
 // Range calls f for every key/value pair in the map. Iteration stops early if
 // f returns false.
 //

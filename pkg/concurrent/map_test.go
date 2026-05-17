@@ -110,6 +110,60 @@ func TestMap_ZeroValueStore(t *testing.T) {
 	assert.Equal(t, 1, val)
 }
 
+func TestMap_LoadOrStore(t *testing.T) {
+	m := NewMap[string, int]()
+
+	val, loaded := m.LoadOrStore("a", 1)
+	assert.False(t, loaded)
+	assert.Equal(t, 1, val)
+
+	val, loaded = m.LoadOrStore("a", 2)
+	assert.True(t, loaded)
+	assert.Equal(t, 1, val)
+
+	// The original value is preserved even after a same-key LoadOrStore.
+	val, ok := m.Load("a")
+	assert.True(t, ok)
+	assert.Equal(t, 1, val)
+}
+
+func TestMap_LoadOrStoreZeroValue(t *testing.T) {
+	// The zero value of Map must be usable for LoadOrStore as well.
+	var m Map[string, int]
+	val, loaded := m.LoadOrStore("a", 42)
+	assert.False(t, loaded)
+	assert.Equal(t, 42, val)
+}
+
+func TestMap_LoadOrStoreConcurrent(t *testing.T) {
+	// Concurrent LoadOrStore calls for the same key must all return the
+	// same value, with exactly one of them reporting loaded == false.
+	m := NewMap[int, int]()
+	var wg sync.WaitGroup
+	const writers = 100
+
+	values := make([]int, writers)
+	loadedFlags := make([]bool, writers)
+	for i := range writers {
+		wg.Go(func() {
+			val, loaded := m.LoadOrStore(0, i)
+			values[i] = val
+			loadedFlags[i] = loaded
+		})
+	}
+	wg.Wait()
+
+	first := values[0]
+	newCount := 0
+	for i := range writers {
+		require.Equal(t, first, values[i])
+		if !loadedFlags[i] {
+			newCount++
+		}
+	}
+	require.Equal(t, 1, newCount, "exactly one caller should report loaded == false")
+}
+
 func TestMap_Concurrent(t *testing.T) {
 	m := NewMap[int, int]()
 	var wg sync.WaitGroup
