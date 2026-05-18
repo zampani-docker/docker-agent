@@ -22,6 +22,7 @@ type sessionClient struct {
 	toolListChangedHandler   func()
 	promptListChangedHandler func()
 	elicitationHandler       tools.ElicitationHandler
+	samplingHandler          tools.SamplingHandler
 	oauthSuccessHandler      func()
 	mu                       sync.RWMutex
 }
@@ -154,6 +155,36 @@ func (c *sessionClient) handleElicitationRequest(ctx context.Context, req *gomcp
 func (c *sessionClient) SetElicitationHandler(handler tools.ElicitationHandler) {
 	c.mu.Lock()
 	c.elicitationHandler = handler
+	c.mu.Unlock()
+}
+
+// handleSamplingRequest forwards incoming sampling/createMessage requests
+// from the MCP server to the registered handler. It is used as the gomcp
+// CreateMessageHandler callback for both stdio and remote clients.
+func (c *sessionClient) handleSamplingRequest(ctx context.Context, req *gomcp.CreateMessageRequest) (*gomcp.CreateMessageResult, error) {
+	slog.DebugContext(ctx, "Received sampling request from MCP server", "messages", len(req.Params.Messages))
+
+	c.mu.RLock()
+	handler := c.samplingHandler
+	c.mu.RUnlock()
+
+	if handler == nil {
+		return nil, errors.New("no sampling handler configured")
+	}
+
+	result, err := handler(ctx, req.Params)
+	if err != nil {
+		return nil, fmt.Errorf("sampling failed: %w", err)
+	}
+
+	return result, nil
+}
+
+// SetSamplingHandler sets the handler that processes sampling requests
+// from the MCP server.
+func (c *sessionClient) SetSamplingHandler(handler tools.SamplingHandler) {
+	c.mu.Lock()
+	c.samplingHandler = handler
 	c.mu.Unlock()
 }
 

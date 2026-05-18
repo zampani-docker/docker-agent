@@ -46,6 +46,13 @@ type Elicitable interface {
 	SetElicitationHandler(handler ElicitationHandler)
 }
 
+// Sampleable is implemented by toolsets that support MCP sampling
+// (sampling/createMessage). MCP servers use sampling to delegate LLM calls
+// back to the host; the handler is expected to drive the host's model.
+type Sampleable interface {
+	SetSamplingHandler(handler SamplingHandler)
+}
+
 // OAuthCapable is implemented by toolsets that support OAuth flows.
 type OAuthCapable interface {
 	SetOAuthSuccessHandler(handler func())
@@ -68,11 +75,15 @@ type ChangeNotifier interface {
 }
 
 // ConfigureHandlers sets all applicable handlers on a toolset.
-// It checks for Elicitable and OAuthCapable interfaces and configures them.
-// This is a convenience function that handles the capability checking internally.
-func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, oauthHandler func(), managedOAuth bool) {
+// It checks for Elicitable, Sampleable and OAuthCapable interfaces and
+// configures them. This is a convenience function that handles the capability
+// checking internally.
+func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, samplingHandler SamplingHandler, oauthHandler func(), managedOAuth bool) {
 	if e, ok := As[Elicitable](ts); ok {
 		e.SetElicitationHandler(elicitHandler)
+	}
+	if s, ok := As[Sampleable](ts); ok {
+		s.SetSamplingHandler(samplingHandler)
 	}
 	if o, ok := As[OAuthCapable](ts); ok {
 		o.SetOAuthSuccessHandler(oauthHandler)

@@ -38,9 +38,10 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 
 	toolChanged, promptChanged := c.notificationHandlers()
 
-	// Create client options with elicitation and notification support
+	// Create client options with elicitation, sampling, and notification support
 	opts := &gomcp.ClientOptions{
 		ElicitationHandler:       c.handleElicitationRequest,
+		CreateMessageHandler:     c.handleSamplingRequest,
 		ToolListChangedHandler:   toolChanged,
 		PromptListChangedHandler: promptChanged,
 	}

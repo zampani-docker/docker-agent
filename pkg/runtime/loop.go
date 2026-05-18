@@ -831,6 +831,7 @@ func (r *LocalRuntime) configureToolsetHandlers(a *agent.Agent, events EventSink
 	for _, toolset := range a.ToolSets() {
 		tools.ConfigureHandlers(toolset,
 			r.elicitationHandler,
+			r.samplingHandler,
 			func() { events.Emit(Authorization(tools.ElicitationActionAccept, a.Name())) },
 			r.managedOAuth,
 		)

@@ -74,6 +74,7 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 
 	opts := &gomcp.ClientOptions{
 		ElicitationHandler:       c.handleElicitationRequest,
+		CreateMessageHandler:     c.handleSamplingRequest,
 		ToolListChangedHandler:   toolChanged,
 		PromptListChangedHandler: promptChanged,
 	}
