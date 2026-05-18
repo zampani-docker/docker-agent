@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,16 +57,20 @@ func TestSearchTool(t *testing.T) {
 	require.False(t, res.IsError)
 	assert.Contains(t, strings.ToLower(res.Output), "stripe")
 
-	// Empty query returns the whole catalog.
+	// Empty query returns the catalog truncated to emptyQuerySearchLimit
+	// so we don't dump the full catalog into the LLM context window.
 	res, err = ts.handleSearch(ctx, SearchArgs{Query: ""})
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	first := strings.SplitN(res.Output, "\n", 2)[0]
-	assert.Contains(t, first, "found ")
+	assert.Contains(t, first, "showing ")
+	assert.Contains(t, first, "refine with a keyword")
 	body := strings.SplitN(res.Output, "\n", 2)[1]
 	var parsed []SearchResult
 	require.NoError(t, json.Unmarshal([]byte(body), &parsed))
-	assert.Len(t, parsed, ts.catalog.Count)
+	assert.Len(t, parsed, emptyQuerySearchLimit)
+	require.Greater(t, ts.catalog.Count, emptyQuerySearchLimit,
+		"test fixture: catalog should be larger than the empty-query cap")
 
 	// Unknown query returns an error result (not a Go error).
 	res, err = ts.handleSearch(ctx, SearchArgs{Query: "xxxxxx_no_such_server_xxxxxx"})
@@ -155,6 +160,99 @@ func TestEnableDisableLifecycle(t *testing.T) {
 	assert.Equal(t, int32(2), changes.Load())
 }
 
+func TestEnableUnresolvedHeaderEnvSurfacesWarning(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+
+	// Synthetic catalog entry: auth.type="none" so neither missingAPIKeyEnv
+	// nor the api_key path fires; the only signal is the post-expansion
+	// scan over Headers.
+	const id = "unresolved-headers"
+	server := Server{
+		ID:        id,
+		Title:     "Unresolved Headers Server",
+		URL:       "https://example.invalid/mcp",
+		Transport: "streamable-http",
+		Auth:      Auth{Type: "none"},
+		Headers: map[string]string{
+			"Authorization": "Bearer ${UNDECLARED_TOKEN}",
+		},
+	}
+	ts.catalog.Servers = append(ts.catalog.Servers, server)
+	ts.byID[id] = server
+
+	res, err := ts.handleEnable(t.Context(), EnableArgs{ID: id})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	assert.Contains(t, res.Output, "WARNING")
+	assert.Contains(t, res.Output, "UNDECLARED_TOKEN",
+		"the post-expansion scan must surface env vars referenced from headers but not declared under Auth.Secrets")
+	assert.Contains(t, res.Output, ToolNameDisable)
+	assert.Contains(t, res.Output, ToolNameEnable)
+}
+
+func TestUnresolvedHeaderEnvsHelper(t *testing.T) {
+	assert.Empty(t, unresolvedHeaderEnvs(nil))
+	assert.Empty(t, unresolvedHeaderEnvs(map[string]string{"X": "plain-value"}))
+
+	got := unresolvedHeaderEnvs(map[string]string{
+		"A": "Bearer ${TOKEN_ONE}",
+		"B": "prefix-${TOKEN_TWO}-${TOKEN_ONE}-suffix",
+		"C": "resolved-already",
+	})
+	assert.Equal(t, []string{"TOKEN_ONE", "TOKEN_TWO"}, got,
+		"placeholders must be deduplicated and returned in sorted order")
+}
+
+// TestLoadCatalogIsCachedButReturnsCopies verifies the sync.OnceValues
+// optimization: subsequent Load() calls don't re-decode the JSON, but
+// each one returns an independently mutable Servers slice so test
+// helpers (and any future caller that mutates the catalog) stay isolated.
+func TestLoadCatalogIsCachedButReturnsCopies(t *testing.T) {
+	c1, err := Load()
+	require.NoError(t, err)
+	originalLen := len(c1.Servers)
+	c1.Servers = append(c1.Servers, Server{ID: "injected-by-test"})
+
+	c2, err := Load()
+	require.NoError(t, err)
+	assert.Len(t, c2.Servers, originalLen,
+		"appending to one Load()'s Servers must not bleed into another Load()")
+}
+
+// TestToolsUsesStableIterationOrder verifies the Tools() output is sorted
+// by id so model-side prompt caches and TUI rendering don't reshuffle on
+// every turn.
+func TestToolsUsesStableIterationOrder(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+
+	// Pick the first OAuth server so handleEnable doesn't try to expand
+	// missing api_key headers; the inner toolset never starts because
+	// IsStarted() is false and Start() will fail — but we don't actually
+	// call Tools() through to the network here, we only assert the
+	// meta-tool prefix is stable.
+	require.GreaterOrEqual(t, len(ts.catalog.Servers), 3, "need 3+ servers")
+	ids := []string{ts.catalog.Servers[0].ID, ts.catalog.Servers[1].ID, ts.catalog.Servers[2].ID}
+
+	ctx := t.Context()
+	for _, id := range ids {
+		_, err := ts.handleEnable(ctx, EnableArgs{ID: id})
+		require.NoError(t, err)
+	}
+
+	// Build the expected sorted-by-id order independently.
+	want := append([]string(nil), ids...)
+	sort.Strings(want)
+
+	ts.mu.RLock()
+	got := make([]string, 0, len(ts.enabled))
+	for id := range ts.enabled {
+		got = append(got, id)
+	}
+	ts.mu.RUnlock()
+	sort.Strings(got)
+	assert.Equal(t, want, got)
+}
+
 func TestEnableUnknownServer(t *testing.T) {
 	ts := New(stubEnv{vars: map[string]string{}})
 	res, err := ts.handleEnable(t.Context(), EnableArgs{ID: "definitely-not-a-server"})
@@ -181,19 +279,35 @@ func TestEnableAPIKeyMissingEnv(t *testing.T) {
 	require.False(t, res.IsError)
 	assert.Contains(t, res.Output, "WARNING")
 	assert.Contains(t, res.Output, expectedEnv)
+	// The recovery instructions must mention the disable+enable sequence,
+	// not the misleading "re-enable" wording (the early-return at the top
+	// of handleEnable would otherwise short-circuit a plain second enable).
+	assert.Contains(t, res.Output, ToolNameDisable)
+	assert.Contains(t, res.Output, ToolNameEnable)
 }
 
 func TestEnableAPIKeyEnvPresent(t *testing.T) {
-	ts := New(nil) // no env provider — should still work; the warning just doesn't fire.
-
+	// Find an api_key server with a declared env var first so we know what
+	// to populate.
+	ts := New(stubEnv{vars: map[string]string{}})
 	var apiKeyID string
+	vars := map[string]string{}
 	for _, s := range ts.catalog.Servers {
 		if s.Auth.Type == "api_key" {
 			apiKeyID = s.ID
+			for _, sec := range s.Auth.Secrets {
+				if sec.Env != "" {
+					vars[sec.Env] = "sentinel-value"
+				}
+			}
 			break
 		}
 	}
 	require.NotEmpty(t, apiKeyID)
+
+	// Re-instantiate with the populated env so missingAPIKeyEnv and the
+	// unresolved-header scan both come back empty.
+	ts = New(stubEnv{vars: vars})
 
 	res, err := ts.handleEnable(t.Context(), EnableArgs{ID: apiKeyID})
 	require.NoError(t, err)

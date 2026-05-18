@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 //go:embed servers.json
@@ -66,14 +67,30 @@ type SecretSpec struct {
 	Example string `json:"example,omitempty"`
 }
 
-// Load returns the embedded catalog. The result is freshly decoded on each
-// call so callers can mutate the returned value freely.
-func Load() (*Catalog, error) {
+// loadOnce caches the parsed catalog. The embedded JSON is immutable for
+// the lifetime of the binary, so we decode it exactly once and hand out
+// shallow copies to callers that intend to mutate it (tests do).
+var loadOnce = sync.OnceValues(func() (*Catalog, error) {
 	var c Catalog
 	if err := json.Unmarshal(serversJSON, &c); err != nil {
 		return nil, fmt.Errorf("decoding embedded MCP catalog: %w", err)
 	}
 	return &c, nil
+})
+
+// Load returns the embedded catalog. The first call decodes the JSON;
+// subsequent calls return a shallow copy so callers can append synthetic
+// servers (notably in tests) without affecting later callers.
+func Load() (*Catalog, error) {
+	cached, err := loadOnce()
+	if err != nil {
+		return nil, err
+	}
+	// Shallow copy with a fresh Servers slice so test-only appends don't
+	// leak across Load() calls. Server values themselves are immutable.
+	cloned := *cached
+	cloned.Servers = append([]Server(nil), cached.Servers...)
+	return &cloned, nil
 }
 
 // MustLoad is like Load but panics on error. Intended for package init.

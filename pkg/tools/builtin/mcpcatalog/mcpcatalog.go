@@ -37,12 +37,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 )
@@ -58,10 +59,9 @@ const (
 // Toolset implements on-demand activation of remote (streamable-http) MCP
 // servers from the Docker MCP Catalog.
 type Toolset struct {
-	catalog  *Catalog
-	byID     map[string]Server
-	expander *js.Expander
-	env      environment.Provider
+	catalog *Catalog
+	byID    map[string]Server
+	env     environment.Provider
 
 	mu sync.RWMutex
 	// enabled holds the per-server StartableToolSet wrapper. Wrapping the
@@ -117,7 +117,6 @@ func New(envProvider environment.Provider) *Toolset {
 	return &Toolset{
 		catalog:          cat,
 		byID:             byID,
-		expander:         js.NewJsExpander(envProvider),
 		env:              envProvider,
 		enabled:          make(map[string]*tools.StartableToolSet),
 		removeOAuthToken: mcp.RemoveOAuthToken,
@@ -330,20 +329,15 @@ func (t *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 	}
 	t.mu.RUnlock()
 
+	// Stable iteration order: handleEnable / handleDisable can run between
+	// Tools() invocations, but for a given snapshot we want a deterministic
+	// merged list so model-side prompt caches and TUI rendering don't
+	// flicker on each turn.
+	sort.Slice(enabled, func(i, j int) bool { return enabled[i].id < enabled[j].id })
+
 	for _, e := range enabled {
 		if err := ctx.Err(); err != nil {
 			return nil, err
-		}
-
-		// Skip servers that were disabled after we snapshotted. Without
-		// this check, a concurrent handleDisable could remove the server
-		// from t.enabled and call Stop(), but we'd still hold a reference
-		// and potentially restart it on the next line.
-		t.mu.RLock()
-		_, stillEnabled := t.enabled[e.id]
-		t.mu.RUnlock()
-		if !stillEnabled {
-			continue
 		}
 
 		if !e.ts.IsStarted() {
@@ -369,6 +363,24 @@ func (t *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 				}
 				continue
 			}
+		}
+
+		// Post-start re-check: a concurrent handleDisable could have
+		// removed e.id from t.enabled and called Stop() on the very
+		// reference we hold. Once Start() returns, started=true again.
+		// If the entry is gone (or has been replaced by a fresh enable
+		// allocating a new wrapper), stop the session we just brought up
+		// so we don't leak it AND don't surface tools for a server the
+		// user explicitly disabled.
+		t.mu.RLock()
+		current, stillEnabled := t.enabled[e.id]
+		t.mu.RUnlock()
+		if !stillEnabled || current != e.ts {
+			if stopErr := e.ts.Stop(ctx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
+				slog.DebugContext(ctx, "Failed to stop superseded remote MCP toolset",
+					"id", e.id, "error", stopErr)
+			}
+			continue
 		}
 
 		serverTools, err := e.ts.Tools(ctx)
@@ -409,6 +421,12 @@ type SearchResult struct {
 	Enabled     bool     `json:"enabled"`
 }
 
+// emptyQuerySearchLimit caps the result set for an empty query so the
+// catalog (currently 45+ servers) doesn't bloat the LLM's context window.
+// A model exploring "is there anything here?" gets a representative
+// sample with a hint to refine; concrete keywords still return every match.
+const emptyQuerySearchLimit = 25
+
 func (t *Toolset) handleSearch(_ context.Context, args SearchArgs) (*tools.ToolCallResult, error) {
 	q := strings.ToLower(strings.TrimSpace(args.Query))
 
@@ -439,11 +457,21 @@ func (t *Toolset) handleSearch(_ context.Context, args SearchArgs) (*tools.ToolC
 
 	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
 
+	total := len(matches)
+	truncated := q == "" && total > emptyQuerySearchLimit
+	if truncated {
+		matches = matches[:emptyQuerySearchLimit]
+	}
+
 	out, err := json.Marshal(matches)
 	if err != nil {
 		return nil, err
 	}
-	return tools.ResultSuccess(fmt.Sprintf("found %d server(s):\n%s", len(matches), string(out))), nil
+	if truncated {
+		return tools.ResultSuccess(fmt.Sprintf("showing %d of %d server(s) (catalog truncated for empty query — refine with a keyword to see more):\n%s",
+			len(matches), total, string(out))), nil
+	}
+	return tools.ResultSuccess(fmt.Sprintf("found %d server(s):\n%s", total, string(out))), nil
 }
 
 // matchesQuery returns true if any of the searchable string fields contains q.
@@ -480,7 +508,17 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 	// Perform these slow external calls BEFORE acquiring the lock — server data
 	// is immutable (from t.byID), no mutex protection needed here.
 	missing := t.missingAPIKeyEnv(ctx, server)
-	headers := t.expander.ExpandMap(ctx, server.Headers)
+	headers := t.expandHeaders(ctx, server.Headers)
+
+	// Belt-and-braces: also surface any ${VAR} placeholders left in the
+	// expanded headers. This catches future catalog entries whose headers
+	// reference an env var that is not declared under Auth.Secrets — the
+	// missingAPIKeyEnv check above wouldn't see those.
+	for _, env := range unresolvedHeaderEnvs(headers) {
+		if !slices.Contains(missing, env) {
+			missing = append(missing, env)
+		}
+	}
 
 	t.mu.Lock()
 	if _, exists := t.enabled[id]; exists {
@@ -489,6 +527,12 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 	}
 
 	// Create the MCP toolset with the pre-computed headers.
+	// The nil third arg (*latest.RemoteOAuthConfig) is intentional: every
+	// server currently in the catalog works with default Dynamic Client
+	// Registration and the runtime's default callback. If a future entry
+	// needs custom scopes / a fixed client_id / a non-default callback,
+	// extend Auth in servers.go and plumb the resulting *RemoteOAuthConfig
+	// through here.
 	mcpToolset := mcp.NewRemoteToolset(id, server.URL, server.Transport, headers, nil)
 
 	// Re-attach the captured handlers so OAuth flows behave identically to
@@ -525,14 +569,49 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		msg.WriteString("auth: OAuth — an authorization URL will be elicited on the next turn.\n")
 	case "api_key":
 		if len(missing) > 0 {
-			fmt.Fprintf(&msg, "auth: API key — WARNING: the following env vars are NOT set: %s. Set them and re-enable, otherwise tool calls will fail.\n", strings.Join(missing, ", "))
+			fmt.Fprintf(&msg, "auth: API key — WARNING: the following env vars are NOT set: %s. Set them, then call %s and %s for this id again, otherwise tool calls will fail.\n",
+				strings.Join(missing, ", "), ToolNameDisable, ToolNameEnable)
 		} else {
 			msg.WriteString("auth: API key — env vars present, ready to use.\n")
 		}
 	default:
-		msg.WriteString("auth: none — ready to use.\n")
+		if len(missing) > 0 {
+			// Headers reference env vars that didn't resolve, even though
+			// the catalog says no auth is required — surface it so the
+			// user is not surprised by a 401 on the first tool call.
+			fmt.Fprintf(&msg, "auth: none — WARNING: header(s) reference unresolved env var(s): %s. Set them, then call %s and %s for this id again.\n",
+				strings.Join(missing, ", "), ToolNameDisable, ToolNameEnable)
+		} else {
+			msg.WriteString("auth: none — ready to use.\n")
+		}
 	}
 	return tools.ResultSuccess(msg.String()), nil
+}
+
+// expandHeaders resolves ${VAR} placeholders in catalog headers against the
+// configured env provider. The catalog uses the bare ${VAR} form (e.g.
+// `Authorization: Bearer ${APIFY_API_KEY}`), so we route through the env
+// provider directly rather than the JavaScript expander — the latter
+// expects the ${env.VAR} form used in YAML configs. Headers that don't
+// contain any placeholder pass through unchanged.
+func (t *Toolset) expandHeaders(ctx context.Context, in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = unresolvedHeaderEnv.ReplaceAllStringFunc(v, func(match string) string {
+			name := match[2 : len(match)-1] // strip ${ and }
+			if t.env == nil {
+				return match
+			}
+			if val, ok := t.env.Get(ctx, name); ok && val != "" {
+				return val
+			}
+			return match // leave the placeholder in place so unresolvedHeaderEnvs picks it up
+		})
+	}
+	return out
 }
 
 // missingAPIKeyEnv returns the names of api_key env vars that are not
@@ -552,6 +631,34 @@ func (t *Toolset) missingAPIKeyEnv(ctx context.Context, s Server) []string {
 		}
 	}
 	return missing
+}
+
+// unresolvedHeaderEnv matches any ${VAR}-style placeholder still present
+// in a header value after expansion — i.e. an env var the expander could
+// not resolve. We scan post-expansion so headers that resolved correctly
+// are silently accepted.
+var unresolvedHeaderEnv = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// unresolvedHeaderEnvs returns the names of every ${VAR} placeholder
+// that survived header expansion. Defends against catalog entries whose
+// headers reference env vars not declared under Auth.Secrets.
+func unresolvedHeaderEnvs(headers map[string]string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, v := range headers {
+		for _, m := range unresolvedHeaderEnv.FindAllStringSubmatch(v, -1) {
+			if _, ok := seen[m[1]]; ok {
+				continue
+			}
+			seen[m[1]] = struct{}{}
+			out = append(out, m[1])
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DisableArgs is the input schema for disable_remote_mcp_server.
