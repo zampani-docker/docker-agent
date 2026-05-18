@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/echolog"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
@@ -70,6 +71,13 @@ func (s *Server) registerRoutes() {
 	group.PATCH("/sessions/:id/title", s.updateSessionTitle)
 	group.PATCH("/sessions/:id/tokens", s.updateSessionTokens)
 	group.PATCH("/sessions/:id/starred", s.setSessionStarred)
+	group.GET("/sessions/:id/models", s.getSessionModels)
+	// PATCH is the canonical verb for updating the agent's model. POST is
+	// also accepted because pkg/runtime Client.SetAgentModel (used by
+	// RemoteRuntime) was historically a POST; keep both so a client
+	// upgrade is not required.
+	group.PATCH("/sessions/:id/model", s.setSessionModel)
+	group.POST("/sessions/:id/model", s.setSessionModel)
 	group.POST("/sessions", s.createSession)
 	group.DELETE("/sessions/:id", s.deleteSession)
 	group.POST("/sessions/:id/agent/:agent", s.runAgent)
@@ -555,6 +563,66 @@ func (s *Server) setSessionStarred(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// getSessionModels lists the models the user can pick from for the
+// session's current agent. Returns 404 if the session has no active runtime
+// (it must have been started at least once or be attached out-of-band)
+// or 422 if the runtime does not support model switching.
+func (s *Server) getSessionModels(c echo.Context) error {
+	sessionID := c.Param("id")
+
+	agentName, current, choices, err := s.sm.AvailableSessionModels(c.Request().Context(), sessionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrModelSwitchingNotSupported):
+			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, ErrSessionNotRunning):
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		default:
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+	}
+
+	return c.JSON(http.StatusOK, runtime.SessionModelsResponse{
+		Agent:           agentName,
+		CurrentModelRef: current,
+		Models:          choices,
+	})
+}
+
+// setSessionModel applies a model override on the session's current agent
+// and persists it. An empty `model` clears the override and reverts the
+// agent to its configured default.
+func (s *Server) setSessionModel(c echo.Context) error {
+	sessionID := c.Param("id")
+
+	var req api.SetSessionModelRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+
+	agentName, modelRef, err := s.sm.SetSessionAgentModel(c.Request().Context(), sessionID, req.Model)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrModelSwitchingNotSupported):
+			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, ErrSessionNotRunning):
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		default:
+			// Unknown errors come from the runtime (e.g. an inline model
+			// ref that fails provider creation) or from the session store
+			// (e.g. a write failure). Both are server-side concerns, not
+			// client mistakes, so map to 500. Validation of the request
+			// body itself is handled above by Bind which returns 400.
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+	}
+
+	return c.JSON(http.StatusOK, api.SetSessionModelResponse{
+		Agent: agentName,
+		Model: modelRef,
+	})
 }
 
 func (s *Server) batchDeleteSessions(c echo.Context) error {

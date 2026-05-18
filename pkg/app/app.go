@@ -777,76 +777,15 @@ func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
 	if !a.runtime.SupportsModelSwitching() {
 		return nil
 	}
-	models := a.runtime.AvailableModels(ctx)
 
-	// Determine the currently active model for this agent
 	agentName := a.runtime.CurrentAgentName()
-	currentModelRef := ""
-	if a.session != nil && a.session.AgentModelOverrides != nil {
-		currentModelRef = a.session.AgentModelOverrides[agentName]
-	}
-
-	// Build a set of model refs already in the list
-	existingRefs := make(map[string]bool)
-	for _, m := range models {
-		existingRefs[m.Ref] = true
-	}
-
-	// Check if current model is in the list and mark it
-	currentFound := currentModelRef == ""
-	for i := range models {
-		if currentModelRef != "" {
-			// An override is set - mark the override as current
-			if models[i].Ref == currentModelRef {
-				models[i].IsCurrent = true
-				currentFound = true
-			}
-		} else {
-			// No override - the default model is current
-			models[i].IsCurrent = models[i].IsDefault
-		}
-	}
-
-	// Add custom models from the session that aren't already in the list
+	currentRef := ""
+	var customRefs []string
 	if a.session != nil {
-		for _, customRef := range a.session.CustomModelsUsed {
-			if existingRefs[customRef] {
-				continue // Already in the list
-			}
-			existingRefs[customRef] = true
-
-			providerName, modelName, _ := strings.Cut(customRef, "/")
-			isCurrent := customRef == currentModelRef
-			if isCurrent {
-				currentFound = true
-			}
-			models = append(models, runtime.ModelChoice{
-				Name:      customRef,
-				Ref:       customRef,
-				Provider:  providerName,
-				Model:     modelName,
-				IsDefault: false,
-				IsCurrent: isCurrent,
-				IsCustom:  true,
-			})
-		}
+		currentRef = a.session.AgentModelOverrides[agentName]
+		customRefs = a.session.CustomModelsUsed
 	}
-
-	// If current model is a custom model not in the list, add it
-	if !currentFound && strings.Contains(currentModelRef, "/") {
-		providerName, modelName, _ := strings.Cut(currentModelRef, "/")
-		models = append(models, runtime.ModelChoice{
-			Name:      currentModelRef,
-			Ref:       currentModelRef,
-			Provider:  providerName,
-			Model:     modelName,
-			IsDefault: false,
-			IsCurrent: true,
-			IsCustom:  true,
-		})
-	}
-
-	return models
+	return runtime.DecorateModelChoices(a.runtime.AvailableModels(ctx), currentRef, customRefs)
 }
 
 // trackCustomModel adds a custom model to the session's history if not already present.

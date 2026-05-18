@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,13 @@ type activeRuntimes struct {
 	titleGen *sessiontitle.Generator // Title generator (includes fallback models)
 
 	streaming sync.Mutex // Held while a RunStream is in progress; serialises concurrent requests
+
+	// modelSwitch serialises concurrent SetSessionAgentModel calls on the
+	// same session. It is held across the (potentially slow) runtime I/O
+	// so we never overlap a SetAgentModel + rollback pair with another
+	// switch on the same session, while still allowing other sessions to
+	// make progress.
+	modelSwitch sync.Mutex
 }
 
 // SessionManager manages sessions for HTTP and Connect-RPC servers.
@@ -223,6 +232,19 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	}
 
 	sess := session.New(opts...)
+
+	// Copy model-related fields from the template so callers can pin a
+	// specific model when creating a session over the API. The runtime
+	// will pick these up the first time it is built for the session
+	// (see runtimeForSession). Callers that want a model to also appear
+	// in the picker history should include it in CustomModelsUsed.
+	if len(sessionTemplate.AgentModelOverrides) > 0 {
+		sess.AgentModelOverrides = maps.Clone(sessionTemplate.AgentModelOverrides)
+	}
+	if len(sessionTemplate.CustomModelsUsed) > 0 {
+		sess.CustomModelsUsed = append([]string(nil), sessionTemplate.CustomModelsUsed...)
+	}
+
 	return sess, sm.sessionStore.AddSession(ctx, sess)
 }
 
@@ -449,7 +471,7 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, messages []api.Message) error {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
-		return errors.New("session not found or not running")
+		return ErrSessionNotRunning
 	}
 
 	for _, msg := range messages {
@@ -474,7 +496,7 @@ func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, mess
 func (sm *SessionManager) FollowUpSession(_ context.Context, sessionID string, messages []api.Message) (streaming bool, err error) {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
-		return false, errors.New("session not found or not running")
+		return false, ErrSessionNotRunning
 	}
 
 	for _, msg := range messages {
@@ -603,10 +625,11 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	// constructor: it must not touch sm.runtimeSessions, otherwise it would
 	// briefly publish a half-initialised activeRuntimes (e.g. without the
 	// cancel func) that other goroutines could observe.
-	t, err := sm.loadTeam(ctx, agentFilename, rc)
+	loadResult, err := sm.loadTeamWithConfig(ctx, agentFilename, rc)
 	if err != nil {
 		return nil, nil, err
 	}
+	t := loadResult.Team
 
 	// Resolve the team's default agent when no specific agent was requested.
 	agt, err := t.AgentOrDefault(currentAgent)
@@ -618,16 +641,30 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	sess.MaxConsecutiveToolCalls = agt.MaxConsecutiveToolCalls()
 	sess.MaxOldToolCallTokens = agt.MaxOldToolCallTokens()
 
+	modelSwitcherCfg := &runtime.ModelSwitcherConfig{
+		Models:             loadResult.Models,
+		Providers:          loadResult.Providers,
+		ModelsGateway:      rc.ModelsGateway,
+		EnvProvider:        rc.EnvProvider(),
+		AgentDefaultModels: loadResult.AgentDefaultModels,
+	}
+
 	opts := []runtime.Opt{
 		runtime.WithCurrentAgent(currentAgent),
 		runtime.WithManagedOAuth(false),
 		runtime.WithSessionStore(sm.sessionStore),
 		runtime.WithTracer(otel.Tracer("cagent")),
+		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
 	}
 	run, err := runtime.New(t, opts...)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Apply any stored per-agent model overrides so that a session
+	// resumed (or freshly created with overrides via CreateSession) uses
+	// the requested models instead of the agent's defaults.
+	applyStoredOverrides(ctx, sess.ID, run, sess.AgentModelOverrides)
 
 	titleGen := sessiontitle.New(agt.Model(ctx), agt.FallbackModels()...)
 
@@ -643,6 +680,33 @@ func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, ru
 	}
 
 	return teamloader.Load(ctx, agentSource, runConfig)
+}
+
+// loadTeamWithConfig is like loadTeam but also returns the loaded model and
+// provider configuration so the runtime can be wired for model switching.
+func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*teamloader.LoadResult, error) {
+	agentSource, found := sm.Sources[agentFilename]
+	if !found {
+		return nil, fmt.Errorf("agent not found: %s", agentFilename)
+	}
+
+	return teamloader.LoadWithConfig(ctx, agentSource, runConfig)
+}
+
+// applyStoredOverrides applies the persisted per-agent model overrides on
+// the freshly created runtime. Failures are logged at WARN and otherwise
+// ignored: a stored override that no longer resolves (e.g. because the
+// model was removed from the agent's config) must not prevent the
+// session from being resumed with the agent's default model.
+func applyStoredOverrides(ctx context.Context, sessionID string, run runtime.Runtime, overrides map[string]string) {
+	if len(overrides) == 0 || !run.SupportsModelSwitching() {
+		return
+	}
+	for agentName, modelRef := range overrides {
+		if err := run.SetAgentModel(ctx, agentName, modelRef); err != nil {
+			slog.WarnContext(ctx, "Failed to apply stored model override", "session_id", sessionID, "agent", agentName, "model", modelRef, "error", err)
+		}
+	}
 }
 
 // GetAgentToolCount loads the agent's team and returns the number of
@@ -727,6 +791,203 @@ func (sm *SessionManager) SetSessionStarred(ctx context.Context, sessionID strin
 	defer sm.mux.Unlock()
 
 	return sm.sessionStore.SetSessionStarred(ctx, sessionID, starred)
+}
+
+// ErrModelSwitchingNotSupported is returned when the runtime backing a
+// session does not support runtime model switching (e.g. when the agent
+// was created without a ModelSwitcherConfig).
+var ErrModelSwitchingNotSupported = errors.New("model switching not supported by this runtime")
+
+// ErrSessionNotRunning is returned by methods that require an active
+// runtime for the session (i.e. RunSession must have been called or
+// AttachRuntime invoked) when none is found. HTTP handlers map this to
+// 404 to distinguish from other runtime errors.
+var ErrSessionNotRunning = errors.New("session not found or not running")
+
+// AvailableSessionModels returns the list of models available for the
+// session's current agent. The agent's name and the active model override
+// (if any) are returned alongside the choices so callers don't have to
+// peek into the runtime registry. A session-scoped runtime is required,
+// so the session must have been started at least once (RunSession called)
+// or be attached out-of-band via AttachRuntime.
+//
+// Each returned ModelChoice has IsCurrent set so the picker can highlight
+// the active selection without a second round-trip. When no override is
+// active, the agent's configured default carries IsCurrent=true; if the
+// override points at an inline provider/model not present in the agent
+// config, a synthetic choice is appended (mirrors App.AvailableModels via
+// the shared runtime.DecorateModelChoices helper).
+func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID string) (string, string, []runtime.ModelChoice, error) {
+	rs, ok := sm.runtimeSessions.Load(sessionID)
+	if !ok {
+		return "", "", nil, ErrSessionNotRunning
+	}
+
+	if !rs.runtime.SupportsModelSwitching() {
+		return "", "", nil, ErrModelSwitchingNotSupported
+	}
+
+	agentName := rs.runtime.CurrentAgentName()
+
+	// Snapshot the override and custom-model history under sm.mux so the
+	// read is atomic with respect to SetSessionAgentModel writes. The
+	// (potentially slow) runtime.AvailableModels call must NOT happen
+	// under sm.mux: it can perform network I/O (provider discovery,
+	// models.dev catalog lookup) and would block every other session
+	// operation in the manager.
+	sm.mux.Lock()
+	current := ""
+	var customRefs []string
+	if rs.session != nil {
+		current = rs.session.AgentModelOverrides[agentName]
+		if n := len(rs.session.CustomModelsUsed); n > 0 {
+			customRefs = make([]string, n)
+			copy(customRefs, rs.session.CustomModelsUsed)
+		}
+	}
+	sm.mux.Unlock()
+
+	choices := runtime.DecorateModelChoices(rs.runtime.AvailableModels(ctx), current, customRefs)
+	return agentName, current, choices, nil
+}
+
+// SetSessionAgentModel applies modelRef as the model override for the
+// current agent of the session, persists it to the session store, and
+// tracks custom models for later re-selection. Pass an empty modelRef
+// to clear the override and revert to the agent's default model.
+//
+// On store-write failure the in-memory session state and the runtime
+// override are rolled back so the next call observes a consistent state.
+//
+// Concurrent SetSessionAgentModel calls on the same session are
+// serialised via the session-scoped modelSwitch lock so the runtime,
+// session and store never observe interleaved updates. The manager-wide
+// sm.mux is only held briefly while reading or mutating session fields,
+// never while calling into the runtime or the store.
+func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, modelRef string) (string, string, error) {
+	rs, ok := sm.runtimeSessions.Load(sessionID)
+	if !ok {
+		return "", "", ErrSessionNotRunning
+	}
+
+	if !rs.runtime.SupportsModelSwitching() {
+		return "", "", ErrModelSwitchingNotSupported
+	}
+
+	rs.modelSwitch.Lock()
+	defer rs.modelSwitch.Unlock()
+
+	agentName := rs.runtime.CurrentAgentName()
+	sess := rs.session
+
+	// Snapshot current state so we can roll back if persistence fails
+	// after we've already mutated the runtime.
+	var (
+		hadOverride     bool
+		prevOverride    string
+		hadOverridesMap bool
+	)
+	if sess != nil {
+		sm.mux.Lock()
+		hadOverridesMap = sess.AgentModelOverrides != nil
+		if hadOverridesMap {
+			prevOverride, hadOverride = sess.AgentModelOverrides[agentName]
+		}
+		sm.mux.Unlock()
+	}
+
+	// Runtime mutation runs without sm.mux so it doesn't block other
+	// session operations during slow provider creation. The per-session
+	// modelSwitch lock above keeps SetAgentModel + UpdateSession + any
+	// rollback atomic with respect to other model-switch calls on this
+	// session.
+	if err := rs.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
+		return "", "", err
+	}
+
+	if sess == nil {
+		return agentName, modelRef, nil
+	}
+
+	// Clone the session for the store write. We'll apply mutations to the
+	// clone, persist it, and only then update the live session. This ensures
+	// concurrent readers never observe a not-yet-persisted state.
+	updatedSess := &session.Session{
+		ID:                      sess.ID,
+		Title:                   sess.Title,
+		CreatedAt:               sess.CreatedAt,
+		WorkingDir:              sess.WorkingDir,
+		ToolsApproved:           sess.ToolsApproved,
+		Permissions:             sess.Permissions,
+		MaxIterations:           sess.MaxIterations,
+		MaxConsecutiveToolCalls: sess.MaxConsecutiveToolCalls,
+		MaxOldToolCallTokens:    sess.MaxOldToolCallTokens,
+		InputTokens:             sess.InputTokens,
+		OutputTokens:            sess.OutputTokens,
+		Cost:                    sess.Cost,
+		Starred:                 sess.Starred,
+	}
+
+	// Clone the maps/slices under sm.mux to avoid data races
+	sm.mux.Lock()
+	if sess.AgentModelOverrides != nil {
+		updatedSess.AgentModelOverrides = maps.Clone(sess.AgentModelOverrides)
+	}
+	if len(sess.CustomModelsUsed) > 0 {
+		updatedSess.CustomModelsUsed = append([]string(nil), sess.CustomModelsUsed...)
+	}
+	sm.mux.Unlock()
+
+	// Apply the mutations to the cloned session
+	var appendedCustomUsed bool
+	if modelRef == "" {
+		delete(updatedSess.AgentModelOverrides, agentName)
+	} else {
+		if updatedSess.AgentModelOverrides == nil {
+			updatedSess.AgentModelOverrides = make(map[string]string)
+		}
+		updatedSess.AgentModelOverrides[agentName] = modelRef
+
+		// Track inline provider/model references so they remain easy to
+		// re-select via the model picker (mirrors App.SetCurrentAgentModel).
+		if strings.Contains(modelRef, "/") && !slices.Contains(updatedSess.CustomModelsUsed, modelRef) {
+			updatedSess.CustomModelsUsed = append(updatedSess.CustomModelsUsed, modelRef)
+			appendedCustomUsed = true
+		}
+	}
+
+	// Persist the cloned session. If this fails, the live session is
+	// unchanged and we only need to roll back the runtime.
+	if err := sm.sessionStore.UpdateSession(ctx, updatedSess); err != nil {
+		rollback := prevOverride
+		if !hadOverride {
+			rollback = ""
+		}
+		if rbErr := rs.runtime.SetAgentModel(ctx, agentName, rollback); rbErr != nil {
+			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "session_id", sessionID, "agent", agentName, "error", rbErr)
+		}
+		return "", "", fmt.Errorf("failed to persist model override: %w", err)
+	}
+
+	// Store write succeeded. Now apply the mutations to the live session
+	// under sm.mux so concurrent readers observe the change atomically.
+	sm.mux.Lock()
+	if modelRef == "" {
+		delete(sess.AgentModelOverrides, agentName)
+	} else {
+		if sess.AgentModelOverrides == nil {
+			sess.AgentModelOverrides = make(map[string]string)
+		}
+		sess.AgentModelOverrides[agentName] = modelRef
+
+		if appendedCustomUsed {
+			sess.CustomModelsUsed = append(sess.CustomModelsUsed, modelRef)
+		}
+	}
+	sm.mux.Unlock()
+
+	slog.DebugContext(ctx, "Updated session model override", "session_id", sessionID, "agent", agentName, "model", modelRef)
+	return agentName, modelRef, nil
 }
 
 // BatchDeleteSessions deletes multiple sessions in a single operation.
