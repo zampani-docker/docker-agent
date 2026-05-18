@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -10,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime/compactor"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -162,6 +165,10 @@ func summaryFromHook(sess *session.Session, a *agent.Agent, pre *hooks.Result) *
 // when it can't be resolved. Failure is non-fatal: a before_compaction
 // hook may supply its own summary and never need the model definition.
 // The LLM strategy itself enforces ContextLimit > 0.
+//
+// See [LocalRuntime.resolveContextLimit] for the resolution order; we
+// pass the cloned summary-call provider so its provider_opts (which
+// match the underlying model) are considered.
 func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agent) int64 {
 	if a == nil || a.Model(ctx) == nil {
 		return 0
@@ -170,11 +177,75 @@ func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agen
 		options.WithStructuredOutput(nil),
 		options.WithMaxTokens(compactor.MaxSummaryTokens),
 	)
-	m, err := r.modelsStore.GetModel(ctx, summaryModel.ID())
-	if err != nil || m == nil {
+	return r.resolveContextLimit(ctx, summaryModel, summaryModel.ID())
+}
+
+// resolveContextLimit resolves the effective context window size for a
+// model. Resolution order:
+//
+//  1. The user-supplied [provider_opts.context_size], when set, is
+//     authoritative. Some providers (notably Docker Model Runner) use
+//     it to size the actual inference context, so we plan against the
+//     same number the engine will enforce. This also makes compaction
+//     work for local models that aren't catalogued in models.dev (e.g.
+//     a HuggingFace GGUF).
+//  2. Otherwise, the models.dev catalogue limit looked up by id.
+//  3. Otherwise, 0 (caller treats this as "can't compact").
+func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provider, id modelsdev.ID) int64 {
+	if n := providerContextLimit(p); n > 0 {
+		return n
+	}
+	m, err := r.modelsStore.GetModel(ctx, id)
+	if err == nil && m != nil && m.Limit.Context > 0 {
+		return int64(m.Limit.Context)
+	}
+	return 0
+}
+
+// providerContextLimit reads [provider_opts.context_size] from a
+// provider's resolved [latest.ModelConfig], returning 0 when unset or
+// not parseable as an integer. This is the fallback used when the
+// models.dev catalogue does not have an entry for the configured
+// model (typically Docker Model Runner with a HuggingFace GGUF model).
+//
+// Accepted shapes mirror what YAML/JSON decoders may produce: int,
+// int64, float64, and decimal strings. Negative or zero values are
+// treated as "unset" so callers don't accidentally trigger
+// compaction with a degenerate limit.
+func providerContextLimit(p provider.Provider) int64 {
+	if p == nil {
 		return 0
 	}
-	return int64(m.Limit.Context)
+	opts := p.BaseConfig().ModelConfig.ProviderOpts
+	v, ok := opts["context_size"]
+	if !ok {
+		return 0
+	}
+	var n int64
+	switch t := v.(type) {
+	case int64:
+		n = t
+	case int:
+		n = int64(t)
+	case int32:
+		n = int64(t)
+	case float64:
+		n = int64(t)
+	case float32:
+		n = int64(t)
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+		if err != nil {
+			return 0
+		}
+		n = parsed
+	default:
+		return 0
+	}
+	if n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // runCompactionAgent runs an agent against a sub-session for compaction.
