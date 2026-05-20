@@ -113,14 +113,17 @@ toolsets:
       transport_type: "sse"
       headers:
         Authorization: "Bearer your-token"
+    # Optional: allow OAuth helper requests to reach private/internal IPs.
+    allow_private_ips: true
     tools: ["search_web", "fetch_url"]
 ```
 
-| Property                | Type   | Description                       |
-| ----------------------- | ------ | --------------------------------- |
-| `remote.url`            | string | Base URL of the MCP server        |
-| `remote.transport_type` | string | `sse` or `streamable`             |
-| `remote.headers`        | object | HTTP headers (typically for auth) |
+| Property                | Type    | Description                                                                                                           |
+| ----------------------- | ------- | --------------------------------------------------------------------------------------------------------------------- |
+| `remote.url`            | string  | Base URL of the MCP server                                                                                            |
+| `remote.transport_type` | string  | `sse` or `streamable`                                                                                                 |
+| `remote.headers`        | object  | HTTP headers (typically for auth)                                                                                     |
+| `allow_private_ips`     | boolean | Permit remote MCP OAuth helper requests to dial non-public IP addresses. Use only for trusted internal servers.        |
 
 ## Auto-Installing Tools
 

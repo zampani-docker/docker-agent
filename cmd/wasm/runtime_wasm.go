@@ -133,23 +133,25 @@ func buildRuntime(ctx context.Context, cfg *latest.Config, env environment.Provi
 				if transport == "" {
 					transport = "streamable-http"
 				}
-				mcpTS := mcptools.NewRemoteToolset(
+				mcpTS := mcptools.NewRemoteToolsetWithAllowPrivateIPs(
 					ts.Name,
 					ts.Remote.URL,
 					transport,
 					ts.Remote.Headers,
 					ts.Remote.OAuth,
+					ts.AllowPrivateIPsEnabled(),
 				)
 				opts = append(opts, agent.WithToolSets(mcpTS))
 			case ts.URL != "":
 				// URL directly on the toolset (legacy format)
 				transport := "streamable-http"
-				mcpTS := mcptools.NewRemoteToolset(
+				mcpTS := mcptools.NewRemoteToolsetWithAllowPrivateIPs(
 					ts.Name,
 					ts.URL,
 					transport,
 					ts.Headers,
 					nil,
+					ts.AllowPrivateIPsEnabled(),
 				)
 				opts = append(opts, agent.WithToolSets(mcpTS))
 			}

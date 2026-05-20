@@ -9,6 +9,7 @@ mcps:
       url: https://mcp.example.com/sse
       headers:
         Authorization: "Bearer token123"
+    allow_private_ips: true
 
 agents:
   root:
@@ -16,3 +17,10 @@ agents:
     toolsets:
       - type: mcp
         ref: my_server
+
+  override:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: my_server
+        allow_private_ips: false

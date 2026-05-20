@@ -21,8 +21,8 @@ import (
 )
 
 // oauthHTTPClient is the *http.Client used for outbound OAuth requests
-// (token exchange, refresh, dynamic client registration). The endpoint
-// URLs come from MCP server metadata, i.e. effectively the remote
+// (metadata discovery, token exchange, refresh, dynamic client registration).
+// The endpoint URLs come from MCP server metadata, i.e. effectively the remote
 // server's choice — so a hostile MCP server could otherwise redirect us
 // at, or hold a connection open to, an internal address. The dialer
 // rejects non-public IPs (defeating SSRF and DNS rebinding to loopback /
@@ -32,6 +32,13 @@ import (
 // Tests in this package replace the var via TestMain (see main_test.go)
 // because httptest.NewServer binds to 127.0.0.1.
 var oauthHTTPClient = httpclient.NewSafeClient(30*time.Second, false)
+
+func oauthHTTPClientForAllowPrivateIPs(allowPrivateIPs bool) *http.Client {
+	if allowPrivateIPs {
+		return &http.Client{Timeout: 30 * time.Second}
+	}
+	return oauthHTTPClient
+}
 
 // GenerateState generates a random state parameter for OAuth CSRF protection
 func GenerateState() (string, error) {
@@ -60,16 +67,16 @@ func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChall
 
 // ExchangeCodeForToken exchanges an authorization code for an access token.
 func ExchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI string) (*OAuthToken, error) {
-	return exchangeCodeForToken(ctx, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, "")
+	return exchangeCodeForToken(ctx, oauthHTTPClient, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, "")
 }
 
 // ExchangeCodeForTokenWithResource exchanges an authorization code and sends
 // the RFC 8707 resource indicator to token endpoints that require it.
 func ExchangeCodeForTokenWithResource(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
-	return exchangeCodeForToken(ctx, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL)
+	return exchangeCodeForToken(ctx, oauthHTTPClient, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL)
 }
 
-func exchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
+func exchangeCodeForToken(ctx context.Context, client *http.Client, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
@@ -90,7 +97,7 @@ func exchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := oauthHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code for token: %w", err)
 	}
@@ -105,7 +112,6 @@ func exchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode token response: %w", err)
 	}
-
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
 
@@ -233,6 +239,10 @@ func constantTimeStateEqual(got, want string) bool {
 
 // RegisterClient performs dynamic client registration
 func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret string, err error) {
+	return registerClient(ctx, oauthHTTPClient, authMetadata, redirectURI, scopes)
+}
+
+func registerClient(ctx context.Context, client *http.Client, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret string, err error) {
 	if authMetadata.RegistrationEndpoint == "" {
 		return "", "", errors.New("authorization server does not support dynamic client registration")
 	}
@@ -260,7 +270,7 @@ func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetada
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := oauthHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to register client: %w", err)
 	}
@@ -282,7 +292,6 @@ func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetada
 	if respBody.ClientID == "" {
 		return "", "", errors.New("registration response missing client_id")
 	}
-
 	return respBody.ClientID, respBody.ClientSecret, nil
 }
 
@@ -294,6 +303,10 @@ func GeneratePKCEVerifier() string {
 // RefreshAccessToken uses a refresh token to obtain a new access token
 // without user interaction.
 func RefreshAccessToken(ctx context.Context, tokenEndpoint, refreshToken, clientID, clientSecret string) (*OAuthToken, error) {
+	return refreshAccessToken(ctx, oauthHTTPClient, tokenEndpoint, refreshToken, clientID, clientSecret)
+}
+
+func refreshAccessToken(ctx context.Context, client *http.Client, tokenEndpoint, refreshToken, clientID, clientSecret string) (*OAuthToken, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
@@ -308,7 +321,7 @@ func RefreshAccessToken(ctx context.Context, tokenEndpoint, refreshToken, client
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := oauthHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
@@ -323,7 +336,6 @@ func RefreshAccessToken(ctx context.Context, tokenEndpoint, refreshToken, client
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode refresh response: %w", err)
 	}
-
 	// Preserve the refresh token if the server didn't issue a new one
 	if token.RefreshToken == "" {
 		token.RefreshToken = refreshToken

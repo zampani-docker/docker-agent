@@ -179,12 +179,13 @@ func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
 type oauthTransport struct {
 	base http.RoundTripper
 	// TODO(rumpl): remove client reference, we need to find a better way to send elicitation requests
-	client      *remoteMCPClient
-	tokenStore  OAuthTokenStore
-	baseURL     string
-	managed     bool
-	oauthConfig *latest.RemoteOAuthConfig
-	oauthFlowMu sync.Mutex
+	client          *remoteMCPClient
+	tokenStore      OAuthTokenStore
+	baseURL         string
+	managed         bool
+	oauthConfig     *latest.RemoteOAuthConfig
+	oauthHTTPClient *http.Client
+	oauthFlowMu     sync.Mutex
 
 	// mu protects refreshFailedAt and lastErr* from concurrent access.
 	mu sync.Mutex
@@ -209,6 +210,13 @@ type oauthTransport struct {
 
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.roundTrip(req, false)
+}
+
+func (t *oauthTransport) oauthClient() *http.Client {
+	if t.oauthHTTPClient != nil {
+		return t.oauthHTTPClient
+	}
+	return oauthHTTPClient
 }
 
 func (t *oauthTransport) authorizeOnce(ctx context.Context, authServer, wwwAuth string) error {
@@ -487,7 +495,7 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 
 	slog.DebugContext(ctx, "Attempting silent token refresh", "url", t.baseURL)
 
-	o := &oauth{metadataClient: &http.Client{Timeout: 5 * time.Second}}
+	o := &oauth{metadataClient: t.oauthClient()}
 	authServer := cmp.Or(token.AuthServer, t.baseURL)
 	metadata, err := o.getAuthorizationServerMetadata(ctx, authServer)
 	if err != nil {
@@ -495,7 +503,14 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 		return nil
 	}
 
-	newToken, err := RefreshAccessToken(ctx, metadata.TokenEndpoint, token.RefreshToken, token.ClientID, token.ClientSecret)
+	newToken, err := refreshAccessToken(
+		ctx,
+		t.oauthClient(),
+		metadata.TokenEndpoint,
+		token.RefreshToken,
+		token.ClientID,
+		token.ClientSecret,
+	)
 	if err != nil {
 		slog.DebugContext(ctx, "Token refresh failed, will require interactive auth", "error", err)
 		t.mu.Lock()
@@ -575,7 +590,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(resourceReq)
+	resp, err := t.oauthClient().Do(resourceReq)
 	if err != nil {
 		return err
 	}
@@ -597,7 +612,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
-	oauth := &oauth{metadataClient: &http.Client{Timeout: 5 * time.Second}}
+	oauth := &oauth{metadataClient: t.oauthClient()}
 	authServerMetadata, err := oauth.getAuthorizationServerMetadata(ctx, resourceMetadata.AuthorizationServers[0])
 	if err != nil {
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
@@ -640,7 +655,13 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		scopes = t.oauthConfig.Scopes
 	case authServerMetadata.RegistrationEndpoint != "":
 		slog.DebugContext(ctx, "Attempting dynamic client registration")
-		clientID, clientSecret, err = RegisterClient(ctx, authServerMetadata, redirectURI, nil)
+		clientID, clientSecret, err = registerClient(
+			ctx,
+			t.oauthClient(),
+			authServerMetadata,
+			redirectURI,
+			nil,
+		)
 		if err != nil {
 			slog.DebugContext(ctx, "Dynamic registration failed", "error", err)
 			// TODO(rumpl): fall back to requesting client ID from user
@@ -700,8 +721,9 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.DebugContext(ctx, "Exchanging authorization code for token")
-	token, err := ExchangeCodeForTokenWithResource(
+	token, err := exchangeCodeForToken(
 		ctx,
+		t.oauthClient(),
 		authServerMetadata.TokenEndpoint,
 		code,
 		verifier,
@@ -742,7 +764,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(resourceReq)
+	resp, err := t.oauthClient().Do(resourceReq)
 	if err != nil {
 		return err
 	}
@@ -764,7 +786,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
-	oauth := &oauth{metadataClient: &http.Client{Timeout: 5 * time.Second}}
+	oauth := &oauth{metadataClient: t.oauthClient()}
 	authServerMetadata, err := oauth.getAuthorizationServerMetadata(ctx, resourceMetadata.AuthorizationServers[0])
 	if err != nil {
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)

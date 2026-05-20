@@ -91,7 +91,16 @@ func TestMCPDefinitions_Remote(t *testing.T) {
 	ts := root.Toolsets[0]
 	assert.Equal(t, "https://mcp.example.com/sse", ts.Remote.URL)
 	assert.Equal(t, "Bearer token123", ts.Remote.Headers["Authorization"])
+	assert.True(t, ts.AllowPrivateIPsEnabled())
 	assert.Empty(t, ts.Ref)
+
+	override, ok := cfg.Agents.Lookup("override")
+	require.True(t, ok)
+	require.Len(t, override.Toolsets, 1)
+
+	ts = override.Toolsets[0]
+	require.NotNil(t, ts.AllowPrivateIPs)
+	assert.False(t, ts.AllowPrivateIPsEnabled())
 }
 
 func TestMCPDefinitions_NoMCPsSection(t *testing.T) {

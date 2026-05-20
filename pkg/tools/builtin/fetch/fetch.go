@@ -470,7 +470,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if len(toolset.BlockedDomains) > 0 {
 		opts = append(opts, WithBlockedDomains(toolset.BlockedDomains))
 	}
-	if toolset.AllowPrivateIPs {
+	if toolset.AllowPrivateIPsEnabled() {
 		opts = append(opts, WithAllowPrivateIPs(true))
 	}
 	opts = append(opts, WithHeaders(expander.ExpandMap(ctx, toolset.Headers)))

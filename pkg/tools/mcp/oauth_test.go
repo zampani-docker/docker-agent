@@ -15,6 +15,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -814,36 +815,63 @@ func TestExtractServerMessage(t *testing.T) {
 	}
 }
 
-func TestExchangeCodeForTokenWithResourceSendsResource(t *testing.T) {
-	var gotResource string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatal(err)
-		}
-		gotResource = r.FormValue("resource")
+func TestOAuthTransportAllowPrivateIPsControlsOAuthClient(t *testing.T) {
+	authMux := http.NewServeMux()
+	authSrv := httptest.NewServer(authMux)
+	defer authSrv.Close()
+
+	authMux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "at",
-			"token_type":   "Bearer",
+			"issuer":                 authSrv.URL,
+			"token_endpoint":         authSrv.URL + "/token",
+			"authorization_endpoint": authSrv.URL + "/authorize",
 		})
-	}))
-	defer srv.Close()
+	})
+	authMux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fresh-at",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	})
 
-	_, err := ExchangeCodeForTokenWithResource(
-		t.Context(),
-		srv.URL,
-		"code",
-		"verifier",
-		"cid",
-		"",
-		"http://localhost/callback",
-		"https://mcp.example.com",
-	)
-	if err != nil {
-		t.Fatalf("ExchangeCodeForTokenWithResource: %v", err)
+	mcpSrv := httptest.NewServer(http.NotFoundHandler())
+	defer mcpSrv.Close()
+
+	newTransport := func(client *http.Client) *oauthTransport {
+		store := NewInMemoryTokenStore()
+		err := store.StoreToken(mcpSrv.URL, &OAuthToken{
+			AccessToken:  "old-at",
+			TokenType:    "Bearer",
+			RefreshToken: "old-rt",
+			ExpiresAt:    time.Now().Add(-1 * time.Hour),
+			AuthServer:   authSrv.URL,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &oauthTransport{
+			base:            http.DefaultTransport,
+			tokenStore:      store,
+			baseURL:         mcpSrv.URL,
+			oauthHTTPClient: client,
+		}
 	}
-	if gotResource != "https://mcp.example.com" {
-		t.Fatalf("resource = %q, want https://mcp.example.com", gotResource)
+
+	safeTransport := newTransport(httpclient.NewSafeClient(time.Second, false))
+	if got := safeTransport.getValidToken(t.Context()); got != nil {
+		t.Fatalf("getValidToken with SSRF-safe OAuth client returned token %q, want nil", got.AccessToken)
+	}
+
+	allowPrivateIPsTransport := newTransport(oauthHTTPClientForAllowPrivateIPs(true))
+	got := allowPrivateIPsTransport.getValidToken(t.Context())
+	if got == nil {
+		t.Fatal("getValidToken with allow_private_ips OAuth client returned nil, want refreshed token")
+	}
+	if got.AccessToken != "fresh-at" {
+		t.Fatalf("AccessToken = %q, want fresh-at", got.AccessToken)
 	}
 }
 
@@ -919,10 +947,11 @@ func TestOAuthTransportCoalescesConcurrentAuthorization(t *testing.T) {
 	})
 
 	transport := &oauthTransport{
-		base:       base,
-		client:     client,
-		tokenStore: NewInMemoryTokenStore(),
-		baseURL:    "http://mcp.example.test/mcp",
+		base:            base,
+		client:          client,
+		tokenStore:      NewInMemoryTokenStore(),
+		baseURL:         "http://mcp.example.test/mcp",
+		oauthHTTPClient: authSrv.Client(),
 	}
 
 	firstReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, transport.baseURL, http.NoBody)
@@ -980,5 +1009,38 @@ func TestOAuthTransportCoalescesConcurrentAuthorization(t *testing.T) {
 	}
 	if got := authenticatedRequests.Load(); got != 2 {
 		t.Fatalf("authenticated retry requests = %d, want 2", got)
+	}
+}
+
+func TestExchangeCodeForTokenWithResourceSendsResource(t *testing.T) {
+	var gotResource string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		gotResource = r.FormValue("resource")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "at",
+			"token_type":   "Bearer",
+		})
+	}))
+	defer srv.Close()
+
+	_, err := ExchangeCodeForTokenWithResource(
+		t.Context(),
+		srv.URL,
+		"code",
+		"verifier",
+		"cid",
+		"",
+		"http://localhost/callback",
+		"https://mcp.example.com",
+	)
+	if err != nil {
+		t.Fatalf("ExchangeCodeForTokenWithResource: %v", err)
+	}
+	if gotResource != "https://mcp.example.com" {
+		t.Fatalf("resource = %q, want https://mcp.example.com", gotResource)
 	}
 }
