@@ -184,6 +184,7 @@ type oauthTransport struct {
 	baseURL     string
 	managed     bool
 	oauthConfig *latest.RemoteOAuthConfig
+	oauthFlowMu sync.Mutex
 
 	// mu protects refreshFailedAt and lastErr* from concurrent access.
 	mu sync.Mutex
@@ -208,6 +209,17 @@ type oauthTransport struct {
 
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.roundTrip(req, false)
+}
+
+func (t *oauthTransport) authorizeOnce(ctx context.Context, authServer, wwwAuth string) error {
+	t.oauthFlowMu.Lock()
+	defer t.oauthFlowMu.Unlock()
+
+	if token := t.getValidToken(ctx); token != nil {
+		return nil
+	}
+
+	return t.handleOAuthFlow(ctx, authServer, wwwAuth)
 }
 
 func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Response, error) {
@@ -255,7 +267,7 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 			resp.Body.Close()
 
 			authServer := req.URL.Scheme + "://" + req.URL.Host
-			if err := t.handleOAuthFlow(req.Context(), authServer, wwwAuth); err != nil {
+			if err := t.authorizeOnce(req.Context(), authServer, wwwAuth); err != nil {
 				// requestElicitation surfaces a bare AuthorizationRequiredError
 				// when the runtime hasn't wired up the elicitation bridge yet,
 				// which normally means OAuth was triggered too early (the

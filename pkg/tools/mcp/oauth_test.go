@@ -1,16 +1,21 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // TestExchangeCodeForToken_PreservesClientCredentials verifies that
@@ -839,5 +844,141 @@ func TestExchangeCodeForTokenWithResourceSendsResource(t *testing.T) {
 	}
 	if gotResource != "https://mcp.example.com" {
 		t.Fatalf("resource = %q, want https://mcp.example.com", gotResource)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestOAuthTransportCoalescesConcurrentAuthorization(t *testing.T) {
+	authMux := http.NewServeMux()
+	authSrv := httptest.NewServer(authMux)
+	defer authSrv.Close()
+
+	authMux.HandleFunc("/resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              "http://mcp.example.test/mcp",
+			"authorization_servers": []string{authSrv.URL},
+		})
+	})
+	authMux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 authSrv.URL,
+			"authorization_endpoint": authSrv.URL + "/authorize",
+			"token_endpoint":         authSrv.URL + "/token",
+		})
+	})
+
+	client := &remoteMCPClient{}
+	var elicitationCalls atomic.Int32
+	enteredElicitation := make(chan struct{})
+	finishElicitation := make(chan struct{})
+	client.SetElicitationHandler(func(context.Context, *gomcp.ElicitParams) (tools.ElicitationResult, error) {
+		if elicitationCalls.Add(1) == 1 {
+			close(enteredElicitation)
+		}
+		<-finishElicitation
+		return tools.ElicitationResult{
+			Action: tools.ElicitationActionAccept,
+			Content: map[string]any{
+				"access_token": "token",
+				"token_type":   "Bearer",
+			},
+		}, nil
+	})
+
+	var unauthenticatedRequests atomic.Int32
+	var authenticatedRequests atomic.Int32
+	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Authorization") == "Bearer token" {
+			authenticatedRequests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     http.StatusText(http.StatusOK),
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Request:    req,
+			}, nil
+		}
+
+		unauthenticatedRequests.Add(1)
+		header := make(http.Header)
+		header.Set("WWW-Authenticate", `Bearer resource="`+authSrv.URL+`/resource"`)
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Status:     http.StatusText(http.StatusUnauthorized),
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader("unauthorized")),
+			Request:    req,
+		}, nil
+	})
+
+	transport := &oauthTransport{
+		base:       base,
+		client:     client,
+		tokenStore: NewInMemoryTokenStore(),
+		baseURL:    "http://mcp.example.test/mcp",
+	}
+
+	firstReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, transport.baseURL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, transport.baseURL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		resp, err := transport.RoundTrip(firstReq)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		errCh <- err
+	}()
+
+	select {
+	case <-enteredElicitation:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not enter OAuth elicitation")
+	}
+
+	go func() {
+		resp, err := transport.RoundTrip(secondReq)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		errCh <- err
+	}()
+
+	deadline := time.After(time.Second)
+	for unauthenticatedRequests.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("second request did not reach 401 path; unauthenticated requests = %d", unauthenticatedRequests.Load())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	close(finishElicitation)
+
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatalf("RoundTrip returned error: %v", err)
+		}
+	}
+
+	if got := elicitationCalls.Load(); got != 1 {
+		t.Fatalf("elicitation calls = %d, want 1", got)
+	}
+	if got := authenticatedRequests.Load(); got != 2 {
+		t.Fatalf("authenticated retry requests = %d, want 2", got)
 	}
 }
