@@ -86,6 +86,9 @@ func applyMCPDefaults(ts, def *latest.Toolset) {
 	if ts.Defer.IsEmpty() {
 		ts.Defer = def.Defer
 	}
+	if ts.AllowPrivateIPs == nil {
+		ts.AllowPrivateIPs = def.AllowPrivateIPs
+	}
 	if ts.WorkingDir == "" {
 		// An empty working_dir in the referencing toolset is treated as "unset":
 		// inherit the definition's value. This matches the semantics of all other

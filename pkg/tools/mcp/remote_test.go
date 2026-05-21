@@ -43,7 +43,7 @@ func TestRemoteClientCustomHeaders(t *testing.T) {
 		"Authorization": "Bearer custom-token",
 	}
 
-	client := newRemoteClient(server.URL, "sse", expectedHeaders, NewInMemoryTokenStore(), nil)
+	client := newRemoteClient(server.URL, "sse", expectedHeaders, NewInMemoryTokenStore(), nil, false)
 
 	// Try to initialize (which will make the HTTP request)
 	// We don't care if it succeeds or fails, we just need it to make the request
@@ -92,7 +92,7 @@ func TestRemoteClientHeadersWithStreamable(t *testing.T) {
 		"X-Custom-Auth": "custom-auth-value",
 	}
 
-	client := newRemoteClient(server.URL, "streamable", expectedHeaders, NewInMemoryTokenStore(), nil)
+	client := newRemoteClient(server.URL, "streamable", expectedHeaders, NewInMemoryTokenStore(), nil, false)
 
 	// Try to initialize
 	_, _ = client.Initialize(t.Context(), nil)
@@ -132,7 +132,7 @@ func TestRemoteClientNoHeaders(t *testing.T) {
 	defer server.Close()
 
 	// Create remote client without custom headers (nil)
-	client := newRemoteClient(server.URL, "sse", nil, NewInMemoryTokenStore(), nil)
+	client := newRemoteClient(server.URL, "sse", nil, NewInMemoryTokenStore(), nil, false)
 
 	_, _ = client.Initialize(t.Context(), nil)
 
@@ -168,7 +168,7 @@ func TestRemoteClientEmptyHeaders(t *testing.T) {
 	defer server.Close()
 
 	// Create remote client with empty headers map
-	client := newRemoteClient(server.URL, "sse", map[string]string{}, NewInMemoryTokenStore(), nil)
+	client := newRemoteClient(server.URL, "sse", map[string]string{}, NewInMemoryTokenStore(), nil, false)
 
 	_, _ = client.Initialize(t.Context(), nil)
 
@@ -213,7 +213,7 @@ func TestInitialize_SurfacesServerErrorInReturnedError(t *testing.T) {
 	store := NewInMemoryTokenStore()
 	require.NoError(t, store.StoreToken(server.URL, &OAuthToken{AccessToken: "at", TokenType: "Bearer"}))
 
-	client := newRemoteClient(server.URL, "streamable", nil, store, nil)
+	client := newRemoteClient(server.URL, "streamable", nil, store, nil, false)
 
 	_, err := client.Initialize(t.Context(), nil)
 	require.Error(t, err, "Initialize should fail against a server that rejects initialize")
@@ -245,7 +245,7 @@ func TestInitialize_NonInteractiveCtxDefersOAuthAndDoesNotBlock(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil)
+	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil, false)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -320,7 +320,7 @@ func TestInitialize_OAuthDefersWhenElicitationBridgeNotReady(t *testing.T) {
 	// flow runs. That path reaches requestElicitation without needing
 	// dynamic client registration, which keeps the test focused on the
 	// bridge-not-ready behaviour.
-	client := newRemoteClient(srv.URL, "streamable", nil, NewInMemoryTokenStore(), nil)
+	client := newRemoteClient(srv.URL, "streamable", nil, NewInMemoryTokenStore(), nil, false)
 
 	// Plain interactive ctx (no WithoutInteractivePrompts marker). The
 	// elicitation handler is intentionally not wired up.
@@ -341,4 +341,13 @@ func TestInitialize_OAuthDefersWhenElicitationBridgeNotReady(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("Initialize blocked for too long: %v", ctx.Err())
 	}
+}
+
+func TestNewRemoteToolsetWithAllowPrivateIPsPropagatesToClient(t *testing.T) {
+	t.Parallel()
+
+	ts := NewRemoteToolsetWithAllowPrivateIPs("internal", "https://mcp.example.com/mcp", "streamable", nil, nil, true)
+	client, ok := ts.mcpClient.(*remoteMCPClient)
+	require.True(t, ok, "remote toolset should use remoteMCPClient")
+	require.True(t, client.allowPrivateIPs, "allow_private_ips should be stored on remote client")
 }

@@ -53,7 +53,22 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 				return nil, fmt.Errorf("working_dir is not supported for MCP toolset %q: ref %q resolves to a remote server (no local subprocess)",
 					toolset.Name, toolset.Ref)
 			}
-			return NewRemoteToolset(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil, nil, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
+			return NewRemoteToolsetWithAllowPrivateIPs(
+				toolset.Name,
+				serverSpec.Remote.URL,
+				serverSpec.Remote.TransportType,
+				nil,
+				nil,
+				toolset.AllowPrivateIPsEnabled(),
+				lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
+			), nil
+		}
+
+		if toolset.AllowPrivateIPsEnabled() {
+			return nil, fmt.Errorf(
+				"allow_private_ips is only supported for remote MCP toolsets: ref %q resolves to a local server",
+				toolset.Ref,
+			)
 		}
 
 		if toolset.WorkingDir != "" {
@@ -97,7 +112,15 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		headers := expander.ExpandMap(ctx, toolset.Remote.Headers)
 		remoteURL := expander.Expand(ctx, toolset.Remote.URL, nil)
 
-		return NewRemoteToolset(toolset.Name, remoteURL, toolset.Remote.TransportType, headers, toolset.Remote.OAuth, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
+		return NewRemoteToolsetWithAllowPrivateIPs(
+			toolset.Name,
+			remoteURL,
+			toolset.Remote.TransportType,
+			headers,
+			toolset.Remote.OAuth,
+			toolset.AllowPrivateIPsEnabled(),
+			lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
+		), nil
 
 	default:
 		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")
@@ -205,12 +228,39 @@ func NewToolsetCommand(name, command string, args, env []string, cwd string, pol
 // The optional policy lets callers tune restart/backoff behaviour;
 // see NewToolsetCommand for the semantics.
 func NewRemoteToolset(name, urlString, transport string, headers map[string]string, oauthConfig *latest.RemoteOAuthConfig, policy ...lifecycle.Policy) *Toolset {
-	slog.Debug("Creating Remote MCP toolset", "url", urlString, "transport", transport, "headers", headers)
+	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, false, policy...)
+}
+
+// NewRemoteToolsetWithAllowPrivateIPs creates a new remote MCP toolset and
+// optionally permits OAuth helper requests to dial non-public IP addresses.
+func NewRemoteToolsetWithAllowPrivateIPs(
+	name, urlString, transport string,
+	headers map[string]string,
+	oauthConfig *latest.RemoteOAuthConfig,
+	allowPrivateIPs bool,
+	policy ...lifecycle.Policy,
+) *Toolset {
+	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, allowPrivateIPs, policy...)
+}
+
+func newRemoteToolset(
+	name, urlString, transport string,
+	headers map[string]string,
+	oauthConfig *latest.RemoteOAuthConfig,
+	allowPrivateIPs bool,
+	policy ...lifecycle.Policy,
+) *Toolset {
+	slog.Debug("Creating Remote MCP toolset",
+		"url", urlString,
+		"transport", transport,
+		"headers", headers,
+		"allow_private_ips", allowPrivateIPs,
+	)
 
 	desc := buildRemoteDescription(urlString, transport)
 	ts := &Toolset{
 		name:        name,
-		mcpClient:   newRemoteClient(urlString, transport, headers, NewKeyringTokenStore(), oauthConfig),
+		mcpClient:   newRemoteClient(urlString, transport, headers, NewKeyringTokenStore(), oauthConfig, allowPrivateIPs),
 		logID:       urlString,
 		description: desc,
 	}

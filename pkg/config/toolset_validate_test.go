@@ -285,7 +285,7 @@ agents:
 			wantErr: "blocked_domains can only be used with type 'fetch'",
 		},
 		{
-			name: "allow_private_ips on non-fetch toolset is rejected",
+			name: "allow_private_ips on unsupported toolset is rejected",
 			config: `
 agents:
   root:
@@ -294,7 +294,7 @@ agents:
       - type: shell
         allow_private_ips: true
 `,
-			wantErr: "allow_private_ips can only be used with type 'fetch'",
+			wantErr: "allow_private_ips can only be used with type 'fetch' or remote MCP toolsets",
 		},
 		{
 			name: "allow_private_ips on fetch toolset is accepted",
@@ -306,6 +306,33 @@ agents:
       - type: fetch
         allow_private_ips: true
 `,
+		},
+		{
+			name: "allow_private_ips on remote mcp toolset is accepted",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: mcp
+        allow_private_ips: true
+        remote:
+          url: "https://mcp.example.com/mcp"
+          transport_type: streamable
+`,
+		},
+		{
+			name: "allow_private_ips on local mcp command is rejected",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: mcp
+        allow_private_ips: true
+        command: docker
+`,
+			wantErr: "allow_private_ips can only be used with type 'fetch' or remote MCP toolsets",
 		},
 		{
 			name: "empty allowed_domains entry is rejected",

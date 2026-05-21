@@ -37,9 +37,13 @@ toolsets:
       transport_type: "sse" # or "streamable"
       headers:
         Authorization: "Bearer token" # optional: static auth
+    # Optional: use only for trusted internal/private MCP or OAuth endpoints.
+    allow_private_ips: true
 ```
 
 For full configuration details, see the [Tool Config]({{ '/configuration/tools/' | relative_url }}) page.
+
+Set `allow_private_ips: true` on a remote MCP toolset only when the MCP server or its OAuth registration/token endpoints intentionally resolve to private, loopback, or link-local addresses. The default blocks those OAuth helper requests to reduce SSRF risk.
 
 ### OAuth for servers without Dynamic Client Registration
 

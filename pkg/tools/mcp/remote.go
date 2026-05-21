@@ -15,27 +15,40 @@ import (
 type remoteMCPClient struct {
 	sessionClient
 
-	url           string
-	transportType string
-	headers       map[string]string
-	tokenStore    OAuthTokenStore
-	managed       bool
-	oauthConfig   *latest.RemoteOAuthConfig
+	url             string
+	transportType   string
+	headers         map[string]string
+	tokenStore      OAuthTokenStore
+	managed         bool
+	oauthConfig     *latest.RemoteOAuthConfig
+	allowPrivateIPs bool
 }
 
-func newRemoteClient(url, transportType string, headers map[string]string, tokenStore OAuthTokenStore, oauthConfig *latest.RemoteOAuthConfig) *remoteMCPClient {
-	slog.Debug("Creating remote MCP client", "url", url, "transport", transportType, "headers", headers)
+func newRemoteClient(
+	url, transportType string,
+	headers map[string]string,
+	tokenStore OAuthTokenStore,
+	oauthConfig *latest.RemoteOAuthConfig,
+	allowPrivateIPs bool,
+) *remoteMCPClient {
+	slog.Debug("Creating remote MCP client",
+		"url", url,
+		"transport", transportType,
+		"headers", headers,
+		"allow_private_ips", allowPrivateIPs,
+	)
 
 	if tokenStore == nil {
 		tokenStore = NewInMemoryTokenStore()
 	}
 
 	return &remoteMCPClient{
-		url:           url,
-		transportType: transportType,
-		headers:       headers,
-		tokenStore:    tokenStore,
-		oauthConfig:   oauthConfig,
+		url:             url,
+		transportType:   transportType,
+		headers:         headers,
+		tokenStore:      tokenStore,
+		oauthConfig:     oauthConfig,
+		allowPrivateIPs: allowPrivateIPs,
 	}
 }
 
@@ -138,12 +151,13 @@ func (c *remoteMCPClient) createHTTPClient() (*http.Client, *oauthTransport) {
 
 	// Then wrap with OAuth support
 	oauthT := &oauthTransport{
-		base:        base,
-		client:      c,
-		tokenStore:  c.tokenStore,
-		baseURL:     c.url,
-		managed:     c.managed,
-		oauthConfig: c.oauthConfig,
+		base:            base,
+		client:          c,
+		tokenStore:      c.tokenStore,
+		baseURL:         c.url,
+		managed:         c.managed,
+		oauthConfig:     c.oauthConfig,
+		oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(c.allowPrivateIPs),
 	}
 
 	return &http.Client{Transport: oauthT}, oauthT
