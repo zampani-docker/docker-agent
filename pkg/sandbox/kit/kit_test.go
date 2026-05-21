@@ -227,6 +227,61 @@ models:
 		"workspace prompt file must not have a redacted copy in the kit")
 }
 
+func TestBuild_PromptFileInWorkspaceParentIsStagedIntoKit(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+
+	// User-realistic layout: the workspace is a project under a
+	// parent directory that holds a shared AGENTS.md (e.g. a
+	// monorepo / dotfiles arrangement). The cwd-walk on the host
+	// finds the parent's AGENTS.md, but inside the sandbox the
+	// parent directory exists only as a synthesised mount point
+	// holding the workspace as its lone child — the host file at
+	// that path is invisible. The kit must therefore stage a copy.
+	parent := t.TempDir()
+	parentAgents := filepath.Join(parent, "AGENTS.md")
+	require.NoError(t, os.WriteFile(parentAgents, []byte("# parent AGENTS.md\n"), 0o600))
+
+	workspace := filepath.Join(parent, "project")
+	require.NoError(t, os.Mkdir(workspace, 0o755))
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-5
+    description: tester
+    instruction: hello
+    add_prompt_files: ["AGENTS.md"]
+models:
+  openai/gpt-5:
+    provider: openai
+    model: gpt-5
+`)
+	yamlPath := filepath.Join(workspace, "agent.yaml")
+	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(workspace)
+
+	res, err := Build(t.Context(), Options{
+		AgentRef:  yamlPath,
+		HostHome:  hostHome,
+		HostCwd:   workspace,
+		Workspace: workspace,
+		CacheDir:  t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, res.Manifest.PromptFiles, 1)
+	entry := res.Manifest.PromptFiles[0]
+	assert.Equal(t, parentAgents, entry.Source)
+	assert.True(t, entry.IsStaged(),
+		"a prompt file in the workspace's parent must be staged: the parent dir is not bind-mounted, only the workspace is")
+
+	data, err := os.ReadFile(filepath.Join(res.HostDir, promptfiles.KitSubdir, "AGENTS.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# parent AGENTS.md\n", string(data))
+}
+
 func TestBuild_NoAgentRefLeavesPromptFilesEmpty(t *testing.T) {
 	isolateEnv(t)
 	// Without an AgentRef there is no team config to walk; the kit
