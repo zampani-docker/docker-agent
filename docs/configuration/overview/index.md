@@ -221,7 +221,8 @@ Applies to:
 - `agents.<name>.commands.*` (string form and `instruction:` field)
 - `toolsets[*].instruction`
 - `toolsets[*].headers` and `toolsets[*].remote.headers` (MCP, A2A, OpenAPI, fetch, API)
-- `toolsets[*].env` values (MCP, shell, script, LSP)
+
+For `api` toolsets, `api_config.endpoint` and `api_config.headers` are also rendered through the JS expander (the same syntax applies).
 
 ```yaml
 agents:
@@ -246,6 +247,7 @@ Applies to:
 
 - `agents.<name>.toolsets[*].working_dir` (MCP, LSP)
 - `agents.<name>.toolsets[*].path` (memory, tasks)
+- `agents.<name>.toolsets[*].env` values (MCP, shell, script, LSP) — these go through `os.Expand`, not the JS evaluator, so `${env.X}` is **not** recognized here either.
 - The `~` prefix is also accepted in any path-like field documented as such.
 
 ```yaml
@@ -268,9 +270,9 @@ The `${env.VAR}` form is **not** recognized in these path fields today.
 | `description`, `welcome_message`              |     ✓      |       ✗       |  ✗  |
 | `instruction` (agent and toolset)             |     ✓      |       ✗       |  ✗  |
 | `commands.*`                                  |     ✓      |       ✗       |  ✗  |
-| `headers`, `remote.headers`                   |     ✓      |       ✗       |  ✗  |
-| `env` values                                  |     ✓      |       ✗       |  ✗  |
+| `headers`, `remote.headers`, `api_config.headers` |     ✓      |       ✗       |  ✗  |
 | `working_dir`, `path`                         |     ✗      |       ✓       |  ✓  |
+| `env` values                                  |     ✗      |       ✓       |  ✗  |
 
 When in doubt, prefer `${env.X}` for prompts and headers, and `${X}` (or `$X`) for paths.
 
