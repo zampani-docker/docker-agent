@@ -27,7 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
-const httpTimeout = 30 * time.Second
+const defaultHTTPTimeout = 30 * time.Second
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
@@ -36,7 +36,14 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	specURL := expander.Expand(ctx, toolset.URL, nil)
 	headers := expander.ExpandMap(ctx, toolset.Headers)
 
-	return New(specURL, headers), nil
+	var opts []Option
+	if toolset.Timeout > 0 {
+		opts = append(opts, WithTimeout(time.Duration(toolset.Timeout)*time.Second))
+	}
+	if toolset.AllowPrivateIPsEnabled() {
+		opts = append(opts, WithAllowPrivateIPs(true))
+	}
+	return New(specURL, headers, opts...), nil
 }
 
 // ToolSet generates HTTP tools from an OpenAPI specification.
@@ -44,11 +51,8 @@ type ToolSet struct {
 	specURL string
 	headers map[string]string
 
-	// unsafe disables SSRF dial-time protection on both the spec fetch
-	// and the generated tools' HTTP calls. It is only set by the
-	// test-only constructor in openapi_test.go (which exists because
-	// tests use httptest.NewServer that binds to 127.0.0.1).
-	unsafe bool
+	timeout         time.Duration
+	allowPrivateIPs bool
 }
 
 // Verify interface compliance.
@@ -57,12 +61,34 @@ var (
 	_ tools.Instructable = (*ToolSet)(nil)
 )
 
+// Option configures an openapi ToolSet.
+type Option func(*ToolSet)
+
+// WithTimeout overrides the default 30s HTTP client timeout used both for
+// fetching the spec and for the generated tools' HTTP calls.
+func WithTimeout(d time.Duration) Option {
+	return func(t *ToolSet) { t.timeout = d }
+}
+
+// WithAllowPrivateIPs disables SSRF dial-time protection on both the spec
+// fetch and the generated tools' HTTP calls. Operators opt in via
+// `allow_private_ips: true` when the spec or its servers legitimately
+// target internal services. Tests use this to talk to httptest.NewServer.
+func WithAllowPrivateIPs(allow bool) Option {
+	return func(t *ToolSet) { t.allowPrivateIPs = allow }
+}
+
 // New creates a new OpenAPI toolset from the given spec URL.
-func New(specURL string, headers map[string]string) *ToolSet {
-	return &ToolSet{
+func New(specURL string, headers map[string]string, opts ...Option) *ToolSet {
+	t := &ToolSet{
 		specURL: specURL,
 		headers: headers,
+		timeout: defaultHTTPTimeout,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Instructions returns usage instructions for the OpenAPI toolset.
@@ -93,7 +119,7 @@ func (t *ToolSet) fetchSpec(ctx context.Context) (*v3.Document, error) {
 	req.Header.Set("Accept", "application/json")
 	setHeaders(req, t.headers)
 
-	resp, err := httpclient.NewSafeClient(httpTimeout, t.unsafe).Do(req)
+	resp, err := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -220,11 +246,12 @@ func (t *ToolSet) operationToTool(baseURL, path, method string, op *v3.Operation
 		Description: desc,
 		Parameters:  schema,
 		Handler: tools.NewHandler((&openAPIHandler{
-			baseURL: baseURL,
-			path:    path,
-			method:  method,
-			headers: t.headers,
-			unsafe:  t.unsafe,
+			baseURL:         baseURL,
+			path:            path,
+			method:          method,
+			headers:         t.headers,
+			timeout:         t.timeout,
+			allowPrivateIPs: t.allowPrivateIPs,
 		}).callTool),
 		Annotations: tools.ToolAnnotations{
 			ReadOnlyHint: readOnly,
@@ -412,8 +439,9 @@ type openAPIHandler struct {
 	path    string
 	method  string
 	headers map[string]string
-	// unsafe disables SSRF dial-time protection. See OpenAPITool.unsafe.
-	unsafe bool
+
+	timeout         time.Duration
+	allowPrivateIPs bool
 }
 
 type openAPICallArgs map[string]any
@@ -446,7 +474,7 @@ func (h *openAPIHandler) callTool(ctx context.Context, params openAPICallArgs) (
 	req.Header.Set("Accept", "application/json")
 	setHeaders(req, h.headers)
 
-	resp, err := httpclient.NewSafeClient(httpTimeout, h.unsafe).Do(req)
+	resp, err := httpclient.NewSafeClient(h.timeout, h.allowPrivateIPs).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}

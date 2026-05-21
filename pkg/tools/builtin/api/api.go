@@ -25,10 +25,11 @@ type ToolSet struct {
 	config   latest.APIToolConfig
 	expander *js.Expander
 
-	// unsafe disables SSRF dial-time protection. Only set by the test-only
-	// constructor in api_test.go (httptest.NewServer binds to 127.0.0.1).
-	unsafe bool
+	timeout         time.Duration
+	allowPrivateIPs bool
 }
+
+const defaultHTTPTimeout = 30 * time.Second
 
 // Verify interface compliance
 var (
@@ -37,7 +38,7 @@ var (
 )
 
 func (t *ToolSet) callTool(ctx context.Context, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
-	client := httpclient.NewSafeClient(30*time.Second, t.unsafe)
+	client := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs)
 
 	endpoint := t.config.Endpoint
 	var reqBody io.Reader = http.NoBody
@@ -100,14 +101,42 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	toolset.APIConfig.Endpoint = expander.Expand(ctx, toolset.APIConfig.Endpoint, nil)
 	toolset.APIConfig.Headers = expander.ExpandMap(ctx, toolset.APIConfig.Headers)
 
-	return New(toolset.APIConfig, expander), nil
+	var opts []Option
+	if toolset.Timeout > 0 {
+		opts = append(opts, WithTimeout(time.Duration(toolset.Timeout)*time.Second))
+	}
+	if toolset.AllowPrivateIPsEnabled() {
+		opts = append(opts, WithAllowPrivateIPs(true))
+	}
+	return New(toolset.APIConfig, expander, opts...), nil
 }
 
-func New(apiConfig latest.APIToolConfig, expander *js.Expander) *ToolSet {
-	return &ToolSet{
+// Option configures an api ToolSet.
+type Option func(*ToolSet)
+
+// WithTimeout overrides the default 30s HTTP client timeout.
+func WithTimeout(d time.Duration) Option {
+	return func(t *ToolSet) { t.timeout = d }
+}
+
+// WithAllowPrivateIPs disables SSRF dial-time protection so the api tool
+// may dial loopback / RFC1918 / link-local addresses. Operators opt in via
+// `allow_private_ips: true` when the configured endpoint legitimately
+// targets internal services. Tests use this to talk to httptest.NewServer.
+func WithAllowPrivateIPs(allow bool) Option {
+	return func(t *ToolSet) { t.allowPrivateIPs = allow }
+}
+
+func New(apiConfig latest.APIToolConfig, expander *js.Expander, opts ...Option) *ToolSet {
+	t := &ToolSet{
 		config:   apiConfig,
 		expander: expander,
+		timeout:  defaultHTTPTimeout,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 func (t *ToolSet) Instructions() string {

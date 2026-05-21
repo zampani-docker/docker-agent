@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,9 +22,7 @@ import (
 // compiled into release binaries. Production callers must use
 // [New].
 func newOpenAPIToolForTest(specURL string, headers map[string]string) *ToolSet {
-	t := New(specURL, headers)
-	t.unsafe = true
-	return t
+	return New(specURL, headers, WithAllowPrivateIPs(true))
 }
 
 const petStoreSpec = `{
@@ -412,6 +411,33 @@ func TestOpenAPITool_RejectsLocalSpecURL(t *testing.T) {
 	}
 }
 
+// TestOpenAPITool_AllowPrivateIPsRestoresLegacyBehaviour verifies that
+// WithAllowPrivateIPs(true) lets the spec fetch reach a loopback host.
+func TestOpenAPITool_AllowPrivateIPsRestoresLegacyBehaviour(t *testing.T) {
+	t.Parallel()
+
+	specServer := serveSpec(t, petStoreSpec)
+
+	_, err := New(specServer.URL+"/openapi.json", nil, WithAllowPrivateIPs(true)).Tools(t.Context())
+	require.NoError(t, err, "WithAllowPrivateIPs(true) must permit dialling 127.0.0.1")
+}
+
+// TestOpenAPITool_TimeoutHonoured confirms WithTimeout caps the spec fetch.
+func TestOpenAPITool_TimeoutHonoured(t *testing.T) {
+	t.Parallel()
+
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(slow.Close)
+
+	_, err := New(slow.URL+"/openapi.json", nil,
+		WithAllowPrivateIPs(true),
+		WithTimeout(50*time.Millisecond),
+	).Tools(t.Context())
+	require.Error(t, err)
+}
+
 func TestOpenAPITool_RejectsLocalSpecServerURL(t *testing.T) {
 	// Even when the spec itself comes from a public URL, the malicious
 	// `servers[].url` it advertises must not be silently dialled. We
@@ -442,9 +468,10 @@ func TestOpenAPITool_RejectsLocalSpecServerURL(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, toolsList, 1)
 
-	// Even though the spec was fetched in unsafe mode, the generated
-	// handler still inherits the unsafe flag — so for the real safety
-	// guarantee we re-run the operation through the production path.
+	// The test constructor opted into private IPs for the spec fetch,
+	// and that opt-in propagates to the generated handlers — so to
+	// validate the production guarantee we re-run the operation through
+	// a freshly-constructed production client (default-deny).
 	prod := New(specServer.URL+"/openapi.json", nil)
 	prodTools, err := prod.Tools(t.Context())
 	require.Error(t, err, "production constructor must refuse a loopback spec server")

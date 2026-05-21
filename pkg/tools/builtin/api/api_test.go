@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,9 +24,7 @@ import (
 // 127.0.0.1). It is defined in a *_test.go file so it is not compiled
 // into release binaries. Production callers must use [New].
 func newAPIToolForTest(config latest.APIToolConfig, expander *js.Expander) *ToolSet {
-	t := New(config, expander)
-	t.unsafe = true
-	return t
+	return New(config, expander, WithAllowPrivateIPs(true))
 }
 
 type testServer struct {
@@ -233,6 +232,39 @@ func TestAPITool_RejectsLocalAddresses(t *testing.T) {
 			assert.Contains(t, err.Error(), "non-public address")
 		})
 	}
+}
+
+// TestAPITool_AllowPrivateIPsRestoresLegacyBehaviour verifies that the
+// allow_private_ips opt-in actually disables the SSRF dial filter.
+func TestAPITool_AllowPrivateIPsRestoresLegacyBehaviour(t *testing.T) {
+	t.Parallel()
+	ts := getTestServer(t)
+
+	tool := New(latest.APIToolConfig{
+		Method:   http.MethodGet,
+		Endpoint: ts.serverURL,
+	}, testExpander(), WithAllowPrivateIPs(true))
+
+	_, err := tool.callTool(t.Context(), tools.ToolCall{})
+	require.NoError(t, err, "WithAllowPrivateIPs(true) must permit dialling 127.0.0.1")
+}
+
+// TestAPITool_TimeoutHonoured confirms WithTimeout caps the request.
+func TestAPITool_TimeoutHonoured(t *testing.T) {
+	t.Parallel()
+
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(slow.Close)
+
+	tool := New(latest.APIToolConfig{
+		Method:   http.MethodGet,
+		Endpoint: slow.URL,
+	}, testExpander(), WithAllowPrivateIPs(true), WithTimeout(50*time.Millisecond))
+
+	_, err := tool.callTool(t.Context(), tools.ToolCall{})
+	require.Error(t, err)
 }
 
 type noopEnvProvider struct{}

@@ -294,7 +294,7 @@ agents:
       - type: shell
         allow_private_ips: true
 `,
-			wantErr: "allow_private_ips can only be used with type 'fetch' or remote MCP toolsets",
+			wantErr: "allow_private_ips can only be used with type 'fetch', 'api', 'openapi' or remote MCP toolsets",
 		},
 		{
 			name: "allow_private_ips on fetch toolset is accepted",
@@ -304,6 +304,34 @@ agents:
     model: "openai/gpt-4"
     toolsets:
       - type: fetch
+        allow_private_ips: true
+`,
+		},
+		{
+			name: "allow_private_ips on api toolset is accepted",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: api
+        allow_private_ips: true
+        api_config:
+          name: probe
+          method: GET
+          endpoint: http://10.0.0.1/health
+          instruction: probe
+`,
+		},
+		{
+			name: "allow_private_ips on openapi toolset is accepted",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: openapi
+        url: http://10.0.0.1/openapi.json
         allow_private_ips: true
 `,
 		},
@@ -332,7 +360,7 @@ agents:
         allow_private_ips: true
         command: docker
 `,
-			wantErr: "allow_private_ips can only be used with type 'fetch' or remote MCP toolsets",
+			wantErr: "allow_private_ips can only be used with type 'fetch', 'api', 'openapi' or remote MCP toolsets",
 		},
 		{
 			name: "empty allowed_domains entry is rejected",
