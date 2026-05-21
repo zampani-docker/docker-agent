@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/sandbox"
 )
 
@@ -154,57 +155,71 @@ func TestForWorkspace_SbxBackend(t *testing.T) {
 }
 
 func TestExtraWorkspace(t *testing.T) {
-	tests := []struct {
-		name     string
-		wd       string
-		agentRef string
-		setup    func(t *testing.T) // create files if needed
-		want     string
-	}{
-		{
-			name: "empty ref",
-			wd:   "/workspace",
-			want: "",
-		},
-		{
-			name:     "yaml outside workspace",
-			wd:       "/workspace",
-			agentRef: "/other/dir/agent.yaml",
-			want:     "/other/dir",
-		},
-		{
-			name:     "yaml inside workspace",
-			wd:       "/workspace",
-			agentRef: "/workspace/sub/agent.yaml",
-			want:     "",
-		},
-		{
-			name:     "yaml in workspace root",
-			wd:       "/workspace",
-			agentRef: "/workspace/agent.yaml",
-			want:     "",
-		},
-		{
-			name:     "built-in name",
-			wd:       "/workspace",
-			agentRef: "default",
-			want:     "",
-		},
-		{
-			name:     "OCI reference",
-			wd:       "/workspace",
-			agentRef: "docker.io/myorg/agent:latest",
-			want:     "",
-		},
-	}
+	t.Run("empty ref", func(t *testing.T) {
+		assert.Empty(t, sandbox.ExtraWorkspace("/workspace", ""))
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.setup != nil {
-				tt.setup(t)
-			}
-			got := sandbox.ExtraWorkspace(tt.wd, tt.agentRef)
-			assert.Equal(t, tt.want, got)
-		})
-	}
+	t.Run("built-in name", func(t *testing.T) {
+		assert.Empty(t, sandbox.ExtraWorkspace("/workspace", "default"))
+	})
+
+	t.Run("OCI reference", func(t *testing.T) {
+		assert.Empty(t, sandbox.ExtraWorkspace("/workspace", "docker.io/myorg/agent:latest"))
+	})
+
+	t.Run("yaml outside workspace", func(t *testing.T) {
+		agentDir := t.TempDir()
+		agent := filepath.Join(agentDir, "agent.yaml")
+		require.NoError(t, os.WriteFile(agent, []byte("x"), 0o600))
+
+		got := sandbox.ExtraWorkspace(t.TempDir(), agent)
+		assert.Equal(t, agentDir, got)
+	})
+
+	t.Run("yaml inside workspace", func(t *testing.T) {
+		wd := t.TempDir()
+		sub := filepath.Join(wd, "sub")
+		require.NoError(t, os.Mkdir(sub, 0o755))
+		agent := filepath.Join(sub, "agent.yaml")
+		require.NoError(t, os.WriteFile(agent, []byte("x"), 0o600))
+
+		assert.Empty(t, sandbox.ExtraWorkspace(wd, agent))
+	})
+
+	t.Run("alias points to file outside workspace", func(t *testing.T) {
+		// Regression: ExtraWorkspace used to call filepath.Abs("gopher")
+		// directly and miss the alias hop, returning "". The sandbox
+		// would then launch without the alias's target YAML mounted
+		// and the in-sandbox docker-agent could not read it.
+		agentDir := t.TempDir()
+		agent := filepath.Join(agentDir, "gopher.yaml")
+		require.NoError(t, os.WriteFile(agent, []byte("x"), 0o600))
+
+		writeAlias(t, "gopher", agent)
+
+		got := sandbox.ExtraWorkspace(t.TempDir(), "gopher")
+		assert.Equal(t, agentDir, got)
+	})
+
+	t.Run("alias points to OCI reference", func(t *testing.T) {
+		// OCI-backed aliases have nothing on the host filesystem to
+		// mount; ExtraWorkspace returns "".
+		writeAlias(t, "remote", "docker.io/myorg/agent:latest")
+
+		assert.Empty(t, sandbox.ExtraWorkspace(t.TempDir(), "remote"))
+	})
+}
+
+// writeAlias points the docker-agent config dir at a fresh tempdir
+// and writes a single-alias config.yaml inside it. The override is
+// reverted via t.Cleanup.
+func writeAlias(t *testing.T, name, path string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	paths.SetConfigDir(dir)
+	t.Cleanup(func() { paths.SetConfigDir("") })
+
+	content := "aliases:\n  " + name + ":\n    path: " + path + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o600))
 }
