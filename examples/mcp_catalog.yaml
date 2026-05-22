@@ -2,11 +2,16 @@
 # MCP server from the Docker MCP Catalog on demand.
 #
 # How it works:
-#   - The mcp_catalog toolset adds 4 meta-tools:
-#       * search_remote_mcp_servers — find servers by keyword
-#       * enable_remote_mcp_server  — activate one (no network yet)
-#       * list_remote_mcp_servers   — show what's currently active
-#       * disable_remote_mcp_server — turn one off again
+#   - The mcp_catalog toolset adds up to 5 meta-tools:
+#       * search_remote_mcp_servers   — find servers by keyword
+#       * enable_remote_mcp_server    — activate one (no network yet)
+#       * list_remote_mcp_servers     — show what's currently active
+#       * disable_remote_mcp_server   — turn one off again
+#       * reset_remote_mcp_server_auth — wipe persisted OAuth credentials
+#         for a server so the next enable triggers a fresh authorization
+#         flow. Useful when a token was revoked, scopes changed, or you
+#         signed in to the wrong account. Only exposed once at least one
+#         server is enabled; no-op for api_key/none servers.
 #   - Tools from servers that have not been enabled stay hidden, so the
 #     prompt is not flooded with hundreds of tool definitions.
 #   - When the model first calls a tool from an enabled server, the
