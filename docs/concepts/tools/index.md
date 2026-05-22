@@ -40,13 +40,14 @@ docker-agent ships with several built-in tools that require no external dependen
 | [LSP]({{ '/tools/lsp/' | relative_url }}) | Connect to Language Server Protocol servers for code intelligence |
 | [API]({{ '/tools/api/' | relative_url }}) | Create custom tools that call HTTP APIs without writing code |
 | [OpenAPI]({{ '/tools/openapi/' | relative_url }}) | Generate tools from an OpenAPI 3.x document |
-| [RAG]({{ '/features/rag/' | relative_url }}) | Retrieval-augmented generation over indexed sources |
+| [RAG]({{ '/tools/rag/' | relative_url }}) | Retrieval-augmented generation over indexed sources |
 | [Model Picker]({{ '/tools/model-picker/' | relative_url }}) | Let the agent pick between several models per turn |
 | [User Prompt]({{ '/tools/user-prompt/' | relative_url }}) | Ask users questions and collect interactive input |
 | [Transfer Task]({{ '/tools/transfer-task/' | relative_url }}) | Delegate tasks to sub-agents (auto-enabled with `sub_agents`) |
 | [Background Agents]({{ '/tools/background-agents/' | relative_url }}) | Dispatch work to sub-agents concurrently |
 | [Handoff]({{ '/tools/handoff/' | relative_url }}) | Hand the conversation off to another local agent in the same config (auto-enabled with `handoffs:`) |
 | [A2A]({{ '/tools/a2a/' | relative_url }}) | Connect to remote agents via the Agent-to-Agent protocol |
+| [MCP Catalog]({{ '/tools/mcp-catalog/' | relative_url }}) | Discover and activate remote MCP servers from the Docker MCP Catalog on demand |
 
 ## MCP Tools
 
