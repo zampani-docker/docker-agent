@@ -72,9 +72,10 @@ func newSandboxListCmd() *cobra.Command {
 }
 
 func runSandboxAllowCommand(cmd *cobra.Command, args []string) (commandErr error) {
-	telemetry.TrackCommand(cmd.Context(), "sandbox", append([]string{"allow"}, args...))
+	// Raw hostnames may identify private corp endpoints; only count them.
+	telemetry.TrackCommand(cmd.Context(), "sandbox", []string{"allow"})
 	defer func() {
-		telemetry.TrackCommandError(cmd.Context(), "sandbox", append([]string{"allow"}, args...), commandErr)
+		telemetry.TrackCommandError(cmd.Context(), "sandbox", []string{"allow"}, commandErr)
 	}()
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
@@ -107,9 +108,9 @@ func runSandboxAllowCommand(cmd *cobra.Command, args []string) (commandErr error
 }
 
 func runSandboxDenyCommand(cmd *cobra.Command, args []string) (commandErr error) {
-	telemetry.TrackCommand(cmd.Context(), "sandbox", append([]string{"deny"}, args...))
+	telemetry.TrackCommand(cmd.Context(), "sandbox", []string{"deny"})
 	defer func() {
-		telemetry.TrackCommandError(cmd.Context(), "sandbox", append([]string{"deny"}, args...), commandErr)
+		telemetry.TrackCommandError(cmd.Context(), "sandbox", []string{"deny"}, commandErr)
 	}()
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
@@ -121,7 +122,10 @@ func runSandboxDenyCommand(cmd *cobra.Command, args []string) (commandErr error)
 	}
 
 	if !cfg.RemoveSandboxHost(host) {
-		return fmt.Errorf("host %q is not on the allowlist", host)
+		// Idempotent: removing an already-absent host is a no-op so
+		// scripts can `sandbox deny <host>` without first checking.
+		out.Printf("Host %q is not on the persistent sandbox allowlist.\n", host)
+		return nil
 	}
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
@@ -131,9 +135,9 @@ func runSandboxDenyCommand(cmd *cobra.Command, args []string) (commandErr error)
 }
 
 func runSandboxListCommand(cmd *cobra.Command, args []string) (commandErr error) {
-	telemetry.TrackCommand(cmd.Context(), "sandbox", append([]string{"list"}, args...))
+	telemetry.TrackCommand(cmd.Context(), "sandbox", []string{"list"})
 	defer func() {
-		telemetry.TrackCommandError(cmd.Context(), "sandbox", append([]string{"list"}, args...), commandErr)
+		telemetry.TrackCommandError(cmd.Context(), "sandbox", []string{"list"}, commandErr)
 	}()
 
 	out := cli.NewPrinter(cmd.OutOrStdout())

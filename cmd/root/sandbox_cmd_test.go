@@ -46,7 +46,10 @@ func TestSandboxAllowDenyList(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"registry.npmjs.org:443"}, cfg.SandboxAllowlist)
 
-	// Denying a host that isn't on the list returns an error.
+	// Denying a host that isn't on the list is idempotent: it prints a
+	// notice and exits successfully so scripts don't have to pre-check.
+	stdout.Reset()
 	root.SetArgs([]string{"sandbox", "deny", "not.on.list.example.com"})
-	require.Error(t, root.Execute())
+	require.NoError(t, root.Execute())
+	assert.Contains(t, stdout.String(), "is not on the persistent sandbox allowlist")
 }
