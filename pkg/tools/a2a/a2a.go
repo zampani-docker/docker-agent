@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -25,12 +27,31 @@ import (
 
 // Toolset implements tools.ToolSet for A2A remote agents.
 type Toolset struct {
-	name    string
-	url     string
-	headers map[string]string
-	client  *a2aclient.Client
-	card    *a2a.AgentCard
-	mu      sync.RWMutex
+	name            string
+	url             string
+	headers         map[string]string
+	timeout         time.Duration
+	allowPrivateIPs bool
+	client          *a2aclient.Client
+	card            *a2a.AgentCard
+	mu              sync.RWMutex
+}
+
+// Option configures a Toolset.
+type Option func(*Toolset)
+
+// WithTimeout overrides the default HTTP client timeout (see
+// [httpclient.DefaultToolHTTPTimeout]) used both for fetching the agent
+// card and for streaming messages.
+func WithTimeout(d time.Duration) Option {
+	return func(t *Toolset) { t.timeout = d }
+}
+
+// WithAllowPrivateIPs disables SSRF dial-time protection so the a2a tool
+// can reach internal services. Off by default; matches the behaviour of
+// the same flag on `fetch`, `api`, `openapi` and remote `mcp`.
+func WithAllowPrivateIPs(allow bool) Option {
+	return func(t *Toolset) { t.allowPrivateIPs = allow }
 }
 
 // Verify interface compliance
@@ -44,16 +65,29 @@ var (
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 	headers := expander.ExpandMap(ctx, toolset.Headers)
-	return NewToolset(toolset.Name, toolset.URL, headers), nil
+
+	var opts []Option
+	if toolset.Timeout > 0 {
+		opts = append(opts, WithTimeout(time.Duration(toolset.Timeout)*time.Second))
+	}
+	if toolset.AllowPrivateIPsEnabled() {
+		opts = append(opts, WithAllowPrivateIPs(true))
+	}
+	return NewToolset(toolset.Name, toolset.URL, headers, opts...), nil
 }
 
 // NewToolset creates a new A2A toolset for the given URL.
-func NewToolset(name, url string, headers map[string]string) *Toolset {
-	return &Toolset{
+func NewToolset(name, url string, headers map[string]string, opts ...Option) *Toolset {
+	t := &Toolset{
 		name:    name,
 		url:     url,
 		headers: headers,
+		timeout: httpclient.DefaultToolHTTPTimeout,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Instructions returns instructions for using the A2A toolset.
@@ -124,19 +158,30 @@ func (t *Toolset) Tools(_ context.Context) ([]tools.Tool, error) {
 
 // Start connects to the A2A agent and fetches the agent card.
 func (t *Toolset) Start(ctx context.Context) error {
-	slog.DebugContext(ctx, "Starting A2A toolset", "url", t.url)
+	slog.DebugContext(ctx, "Starting A2A toolset", "url", t.url, "timeout", t.timeout, "allow_private_ips", t.allowPrivateIPs)
 
-	card, err := agentcard.DefaultResolver.Resolve(ctx, t.url)
+	// Use the SSRF-safe client to fetch the agent card so a malicious or
+	// misconfigured `url:` cannot reach loopback / RFC1918 / link-local
+	// addresses (cloud metadata at 169.254.169.254 in particular). The
+	// `allow_private_ips: true` opt-in disables this for legitimate
+	// internal-service use.
+	resolver := agentcard.NewResolver(httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs))
+	card, err := resolver.Resolve(ctx, t.url)
 	if err != nil {
 		return fmt.Errorf("failed to fetch A2A agent card: %w", err)
 	}
 
-	// Use a longer timeout for the HTTP client since LLM responses can take a while.
-	// The default a2a-go HTTP client has only a 5-second timeout which is too short.
-	httpClient := httpclient.NewHTTPClient(ctx)
-	httpClient.Transport = upstream.NewHeaderTransport(httpClient.Transport, t.headers)
+	httpClient := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs)
+	base := httpClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	httpClient.Transport = upstream.NewHeaderTransport(base, t.headers)
 
-	client, err := a2aclient.NewFromCard(ctx, card, a2aclient.WithJSONRPCTransport(httpClient))
+	client, err := a2aclient.NewFromCard(ctx, card,
+		a2aclient.WithDefaultsDisabled(),
+		a2aclient.WithJSONRPCTransport(httpClient),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A client: %w", err)
 	}
