@@ -166,7 +166,7 @@ func (p *progressBar) render(final bool) {
 
 	// Calculate bar width based on terminal size
 	// Reserve space for: "[" + "]" + " 100% (999/999) " + counts (~20) + running info (~30)
-	barWidth := min(max(termWidth-80, 10), 10)
+	barWidth := min(max(termWidth-80, 10), 30)
 
 	filledWidth := 0
 	if p.total > 0 {
