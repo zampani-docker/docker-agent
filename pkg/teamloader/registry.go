@@ -66,8 +66,15 @@ func NewDefaultToolsetRegistry() ToolsetRegistry {
 			"mcp": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 				return mcp.CreateToolSet(ctx, toolset, runConfig)
 			},
-			"mcp_catalog": func(_ context.Context, _ latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
-				return mcpcatalog.New(runConfig.EnvProvider()), nil
+			"mcp_catalog": func(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+				var opts []mcpcatalog.Option
+				if len(toolset.AllowedServers) > 0 {
+					opts = append(opts, mcpcatalog.WithAllowedServers(toolset.AllowedServers))
+				}
+				if len(toolset.BlockedServers) > 0 {
+					opts = append(opts, mcpcatalog.WithBlockedServers(toolset.BlockedServers))
+				}
+				return mcpcatalog.New(runConfig.EnvProvider(), opts...), nil
 			},
 			"api": func(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 				return api.CreateToolSet(toolset, runConfig)
