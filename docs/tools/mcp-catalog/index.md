@@ -27,7 +27,27 @@ toolsets:
   - type: mcp_catalog
 ```
 
-The toolset takes no options: the catalog is embedded in the docker-agent binary and refreshed with each release.
+The catalog is embedded in the docker-agent binary and refreshed with each release. By default every server in the embedded subset is offered.
+
+### Restricting the offered servers
+
+Two optional lists narrow what the toolset offers, so an agent sees a focused, predictable menu instead of the full catalog:
+
+- **`allowed_servers`** — when non-empty, **only** these catalog server ids are searchable and enableable; every other entry is hidden.
+- **`blocked_servers`** — removes individual ids from the offered set. It is applied **after** `allowed_servers`, so a server listed in both is blocked (block wins over allow).
+
+Both take server ids (the `id` field returned by `search_remote_mcp_servers`). An empty or omitted list disables that filter.
+
+```yaml
+toolsets:
+  - type: mcp_catalog
+    allowed_servers:
+      - docker-docs
+      - microsoft-learn
+      - hugging-face
+    blocked_servers:
+      - gitmcp
+```
 
 ## Meta-Tools
 
@@ -76,7 +96,7 @@ agents:
       - type: mcp_catalog
 ```
 
-A complete, runnable configuration lives in [`examples/mcp_catalog.yaml`](https://github.com/docker/docker-agent/blob/main/examples/mcp_catalog.yaml).
+A complete, runnable configuration lives in [`examples/mcp_catalog.yaml`](https://github.com/docker/docker-agent/blob/main/examples/mcp_catalog.yaml). A curated, allow/block-listed variant lives in [`examples/mcp_catalog_filtered.yaml`](https://github.com/docker/docker-agent/blob/main/examples/mcp_catalog_filtered.yaml).
 
 ## Notes and Limitations
 
