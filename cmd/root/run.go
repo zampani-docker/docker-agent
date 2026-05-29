@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -69,6 +70,7 @@ type runExecFlags struct {
 	listenAddr       string
 	onEventSpecs     []string
 	disabledCommands []string
+	theme            string
 
 	// globalPermissions holds the user-level global permission checker built
 	// from user config settings. Nil when no global permissions are configured.
@@ -144,6 +146,8 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVar(&flags.appName, "app-name", "", "Application name shown in the TUI in place of \"docker agent\"")
 	cmd.PersistentFlags().StringSliceVar(&flags.disabledCommands, "disable-commands", nil, "Comma-separated list of slash commands to hide and disable in the TUI (e.g. /cost,/eval,/model)")
 	cmd.PersistentFlags().BoolVar(&flags.sidebar, "sidebar", true, "Show the sidebar in the TUI (set --sidebar=false to hide it)")
+	cmd.PersistentFlags().StringVar(&flags.theme, "theme", "", "Preselect a TUI theme by name (overrides the theme from user config; ignored outside the interactive TUI)")
+	_ = cmd.RegisterFlagCompletionFunc("theme", completeTheme)
 	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox (requires Docker Desktop with sandbox support)")
 	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "docker/sandbox-templates:docker-agent", "Template image for the sandbox (passed to docker sandbox create -t)")
 	cmd.PersistentFlags().BoolVar(&flags.sbx, "sbx", true, "Prefer the sbx CLI backend when available (set --sbx=false to force docker sandbox)")
@@ -174,6 +178,15 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		defer func() { // do not inline this defer so that commandErr is not resolved early
 			telemetry.TrackCommandError(ctx, "run", args, commandErr)
 		}()
+	}
+
+	// Validate an explicit --theme value early so a typo fails fast with a
+	// helpful message instead of silently falling back to the default theme
+	// once the TUI starts.
+	if f.theme != "" {
+		if err := validateTheme(f.theme); err != nil {
+			return err
+		}
 	}
 
 	// Resolve alias / runtime-declared sandbox opt-in before dispatch.
@@ -321,7 +334,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		return err
 	}
 
-	applyTheme()
+	applyTheme(f.theme)
 	opts, err := f.buildAppOpts(args)
 	if err != nil {
 		return err
@@ -637,12 +650,29 @@ func stopToolSets(t toolStopper) {
 	}
 }
 
-// applyTheme applies the theme from user config, or the built-in default.
-func applyTheme() {
-	// Resolve theme from user config > built-in default
+// validateTheme reports whether ref names a loadable theme. It is used to
+// fail fast on an explicit --theme value, listing the available themes so the
+// user can correct a typo.
+func validateTheme(ref string) error {
+	if _, err := styles.LoadTheme(ref); err != nil {
+		if refs, listErr := styles.ListThemeRefs(); listErr == nil && len(refs) > 0 {
+			return fmt.Errorf("unknown theme %q; available themes: %s", ref, strings.Join(refs, ", "))
+		}
+		return fmt.Errorf("unknown theme %q: %w", ref, err)
+	}
+	return nil
+}
+
+// applyTheme applies the theme, resolving it from the --theme flag, then the
+// user config, then the built-in default.
+func applyTheme(themeOverride string) {
+	// Resolve theme from --theme flag > user config > built-in default
 	themeRef := styles.DefaultThemeRef
 	if userSettings := userconfig.Get(); userSettings.Theme != "" {
 		themeRef = userSettings.Theme
+	}
+	if themeOverride != "" {
+		themeRef = themeOverride
 	}
 
 	theme, err := styles.LoadTheme(themeRef)
