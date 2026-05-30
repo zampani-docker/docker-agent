@@ -10,6 +10,8 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -274,12 +276,49 @@ func (m *agentPickerModel) openDetails() {
 func (m *agentPickerModel) detailsContent(choice agentChoice) string {
 	switch {
 	case choice.yaml != "":
-		return strings.TrimRight(choice.yaml, "\n")
+		return highlightYAML(strings.TrimRight(choice.yaml, "\n"))
 	case choice.err != nil:
 		return "Failed to load agent:\n\n" + choice.err.Error()
 	default:
 		return "No configuration available."
 	}
+}
+
+// highlightYAML syntax-colorizes YAML using chroma with the active TUI theme.
+// On any tokenisation error it returns the source unchanged.
+func highlightYAML(src string) string {
+	lexer := lexers.Get("yaml")
+	if lexer == nil {
+		return src
+	}
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, src)
+	if err != nil {
+		return src
+	}
+
+	style := styles.ChromaStyle()
+	var b strings.Builder
+	for _, token := range iterator.Tokens() {
+		b.WriteString(chromaTokenStyle(token.Type, style).Render(token.Value))
+	}
+	return b.String()
+}
+
+// chromaTokenStyle maps a chroma token type to a lipgloss style using the
+// given chroma style (theme).
+func chromaTokenStyle(tokenType chroma.TokenType, style *chroma.Style) lipgloss.Style {
+	entry := style.Get(tokenType)
+	s := lipgloss.NewStyle()
+	if entry.Colour.IsSet() {
+		s = s.Foreground(lipgloss.Color(entry.Colour.String()))
+	}
+	if entry.Bold == chroma.Yes {
+		s = s.Bold(true)
+	}
+	if entry.Italic == chroma.Yes {
+		s = s.Italic(true)
+	}
+	return s
 }
 
 func (m *agentPickerModel) View() tea.View {

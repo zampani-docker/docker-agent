@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -77,14 +78,32 @@ func TestAgentPickerDetailsToggle(t *testing.T) {
 	assert.False(t, m.showDetails)
 	m.openDetails()
 	assert.True(t, m.showDetails)
-	assert.Contains(t, m.details.GetContent(), "model: auto")
+	assert.Contains(t, ansi.Strip(m.details.GetContent()), "model: auto")
 }
 
 func TestDetailsContent(t *testing.T) {
 	m := newAgentPickerModel(nil)
-	assert.Equal(t, "a: b", m.detailsContent(agentChoice{yaml: "a: b\n\n"}))
+	// YAML is syntax-highlighted, so compare with ANSI stripped.
+	assert.Equal(t, "a: b", ansi.Strip(m.detailsContent(agentChoice{yaml: "a: b\n\n"})))
 	assert.Contains(t, m.detailsContent(agentChoice{err: errors.New("boom")}), "boom")
 	assert.Equal(t, "No configuration available.", m.detailsContent(agentChoice{}))
+}
+
+func TestHighlightYAML(t *testing.T) {
+	src := "agents:\n  root:\n    model: auto"
+	out := highlightYAML(src)
+	// Colorized output differs from the input but preserves the text
+	// (ignoring any insignificant trailing whitespace per line).
+	assert.NotEqual(t, src, out)
+	assert.Equal(t, src, trimTrailingPerLine(ansi.Strip(out)))
+}
+
+func trimTrailingPerLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestPercentLabel(t *testing.T) {
