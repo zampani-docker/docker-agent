@@ -3,6 +3,40 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.70.2] - 2026-06-01
+
+This release adds support for inline skills in agent configuration and improves environment variable handling in path fields, along with several bug fixes.
+
+## What's New
+- Adds support for inline skills in agent YAML config, allowing skills to be defined directly without separate files
+- Adds support for `${env.VAR}` syntax in path fields as an alias for `${VAR}`
+
+## Improvements
+- Streams tool outputs for better real-time feedback
+
+## Bug Fixes
+- Fixes duplicate persistent toolset-failure notifications that were stacking in the TUI
+- Fixes MCP OAuth dialog re-appearing after user declines authentication
+- Surfaces inline-skill decode errors and rejects file reads for inline skills
+
+## Technical Changes
+- Removes obsolete expansion-mismatch warnings for path fields
+- Extracts failureStreak helper in StartableToolSet
+- Removes notification-layer deduplication
+- Removes MCP server on OAuth decline and stops providing incorrect information to the model
+
+### Pull Requests
+
+- [#2884](https://github.com/docker/docker-agent/pull/2884) - fix: dedupe persistent toolset-failure notifications (#2884)
+- [#2940](https://github.com/docker/docker-agent/pull/2940) - docs: update CHANGELOG.md for v1.70.1
+- [#2941](https://github.com/docker/docker-agent/pull/2941) - chore: bump direct Go dependencies
+- [#2943](https://github.com/docker/docker-agent/pull/2943) - fix: dedupe persistent toolset-failure notifications
+- [#2944](https://github.com/docker/docker-agent/pull/2944) - feat(config): accept ${env.X} in path fields (steps 2-4 of #2615)
+- [#2945](https://github.com/docker/docker-agent/pull/2945) - Stream tool outputs
+- [#2946](https://github.com/docker/docker-agent/pull/2946) - feat: support inline skills in agent YAML config
+- [#2949](https://github.com/docker/docker-agent/pull/2949) - fix(mcp): stop the OAuth Authentication Request loop after the user clicks Cancel
+
+
 ## [v1.70.1] - 2026-06-01
 
 This release introduces agent selection UI, git worktree isolation, theme preselection, and notification improvements for enhanced workflow management.
@@ -3144,3 +3178,5 @@ This release improves the terminal user interface with better error handling and
 [v1.70.0]: https://github.com/docker/docker-agent/releases/tag/v1.70.0
 
 [v1.70.1]: https://github.com/docker/docker-agent/releases/tag/v1.70.1
+
+[v1.70.2]: https://github.com/docker/docker-agent/releases/tag/v1.70.2
