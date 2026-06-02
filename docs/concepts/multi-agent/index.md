@@ -21,7 +21,7 @@ Each agent has its own model, tools, and instructions — optimized for its spec
 
 ## Two Patterns: Delegation vs. Handoffs
 
-docker-agent supports two multi-agent patterns:
+Docker Agent supports two multi-agent patterns:
 
 | | **Delegation** (`sub_agents`) | **Handoffs** (`handoffs`) |
 |---|---|---|
@@ -216,10 +216,47 @@ External sub-agents are automatically named after their last path segment — fo
 <div class="callout-title">Tip
 </div>
   <p>External sub-agents work with any OCI-compatible registry, not just the Docker Agent Catalog. See <a href="{{ '/concepts/distribution/' | relative_url }}">Agent Distribution</a> for more on registry references.</p>
+  <p>See <a href="https://github.com/docker/docker-agent/blob/main/examples/sub-agents-from-catalog.yaml"><code>examples/sub-agents-from-catalog.yaml</code></a> for a complete example mixing local and catalog sub-agents.</p>
 
 </div>
 
+## Harness-Backed Sub-Agents
+
+Sub-agents can be backed by external coding CLIs — Claude Code, Codex, opencode, or pi — instead of a model API. Add a `harness:` block in place of a `model:` field to create a harness sub-agent:
+
+```yaml
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: Orchestrator that plans and delegates
+    instruction: |
+      Break down coding tasks and delegate to the coding agents.
+    sub_agents:
+      - claude-coder
+      - codex-coder
+
+  claude-coder:
+    description: Claude Code specialist
+    harness:
+      type: claude-code
+      effort: high
+
+  codex-coder:
+    description: Codex specialist
+    harness:
+      type: codex
+```
+
+The orchestrator uses `transfer_task` to send work to a harness sub-agent just like any other sub-agent. Docker Agent handles the orchestration and hooks; the external CLI drives the coding loop.
+
+<div class="callout callout-tip" markdown="1">
+<div class="callout-title">Learn more
+</div>
+  <p>See <a href="{{ '/features/harnesses/' | relative_url }}">Coding Harnesses</a> for the full field reference, parallel dispatch patterns, and what does not work inside harness agents.</p>
+</div>
+
 ## Example: Development Team
+
 
 ```yaml
 agents:
@@ -346,8 +383,8 @@ toolsets:
 - **Choose the right pattern** — Use `sub_agents` for hierarchical task delegation, `handoffs` for pipeline workflows and conversational routing
 
 <div class="callout callout-info" markdown="1">
-<div class="callout-title">Beyond docker-agent
+<div class="callout-title">Beyond Docker Agent
 </div>
-  <p>For interoperability with other agent frameworks, docker-agent supports the <a href="{{ '/features/a2a/' | relative_url }}">A2A protocol</a> and can expose agents via <a href="{{ '/features/mcp-mode/' | relative_url }}">MCP Mode</a>.</p>
+  <p>For interoperability with other agent frameworks, Docker Agent supports the <a href="{{ '/features/a2a/' | relative_url }}">A2A protocol</a> and can expose agents via <a href="{{ '/features/mcp-mode/' | relative_url }}">MCP Mode</a>.</p>
 
 </div>
