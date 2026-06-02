@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.71.0] - 2026-06-02
+
+This release improves GitHub Copilot integration with better API routing and error handling, along with enhanced conversation state management and expanded documentation.
+
+## Bug Fixes
+- Fixes GitHub Copilot Responses API auto-selection and error preservation to properly route models to correct endpoints
+- Prevents X-Conversation-Id from mutating cached session on retry by making continuations transactional
+- Preserves item value fields and Ask permission in Session.Clone operations
+- Implements deep-copy for Evals, EvalResult, and ToolDefinitions in session clones
+- Updates github-copilot model from gpt-4o to gpt-4.1 to match available models
+
+## Technical Changes
+- Freezes configuration schema v9 and starts v10 as latest version
+- Adds comprehensive documentation for coding harnesses, caching, lifecycle, defer, and fetch filtering
+- Adds end-to-end tests for conversation state handling across failed turns
+
+### Pull Requests
+
+- [#2885](https://github.com/docker/docker-agent/pull/2885) - fix: github-copilot Responses API auto-selection and error preservation (#2885)
+- [#2942](https://github.com/docker/docker-agent/pull/2942) - fix: github-copilot Responses API auto-selection and error preservation
+- [#2947](https://github.com/docker/docker-agent/pull/2947) - fix: keep failed chat continuations out of conversation cache
+- [#2950](https://github.com/docker/docker-agent/pull/2950) - docs: document coding harnesses and fill P0/P1/P2 documentation gaps
+- [#2951](https://github.com/docker/docker-agent/pull/2951) - docs: update CHANGELOG.md for v1.70.2
+- [#2960](https://github.com/docker/docker-agent/pull/2960) - chore(config): freeze v9 and bump latest to v10
+- [#2961](https://github.com/docker/docker-agent/pull/2961) - fix: update github-copilot model from gpt-4o to gpt-4.1
+
+
 ## [v1.70.2] - 2026-06-01
 
 This release adds support for inline skills in agent configuration and improves environment variable handling in path fields, along with several bug fixes.
@@ -3180,3 +3207,5 @@ This release improves the terminal user interface with better error handling and
 [v1.70.1]: https://github.com/docker/docker-agent/releases/tag/v1.70.1
 
 [v1.70.2]: https://github.com/docker/docker-agent/releases/tag/v1.70.2
+
+[v1.71.0]: https://github.com/docker/docker-agent/releases/tag/v1.71.0
