@@ -1,5 +1,3 @@
-version: "11"
-
 models:
   model:
     provider: anthropic
