@@ -475,16 +475,33 @@ func resolveExecutable() (string, error) {
 	return filepath.Abs(exe)
 }
 
+// backupFilePrefix is the basename prefix of the temp backup created by
+// backupExecutable. Cleanup only removes paths matching it so a hostile or
+// accidental DOCKER_AGENT_SELF_UPDATE_BACKUP value cannot delete arbitrary
+// files on startup.
+const backupFilePrefix = ".docker-agent-backup-"
+
 // Cleanup removes the previous-binary backup after a successful re-exec. It is
 // deliberately best-effort: cleanup failure must never block normal execution.
+//
+// The backup path comes from an environment variable, so it is validated to
+// look like a backup file produced by this package before being removed. This
+// prevents an attacker-controlled environment from turning startup into an
+// arbitrary file deletion.
 func Cleanup(ctx context.Context) {
 	backup := os.Getenv(envBackupMarker)
-	if backup == "" {
+	if backup == "" || !isOwnedBackupPath(backup) {
 		return
 	}
 	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.DebugContext(ctx, "Could not remove self-update backup", "path", backup, "error", err)
 	}
+}
+
+// isOwnedBackupPath reports whether p looks like a backup file created by
+// backupExecutable, i.e. its basename carries the expected prefix.
+func isOwnedBackupPath(p string) bool {
+	return strings.HasPrefix(filepath.Base(p), backupFilePrefix)
 }
 
 // installExecutable swaps the binary at dst with the staged file at src and
@@ -520,7 +537,7 @@ func backupExecutable(path string) (string, error) {
 	}
 	defer in.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".docker-agent-backup-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), backupFilePrefix+"*")
 	if err != nil {
 		return "", err
 	}

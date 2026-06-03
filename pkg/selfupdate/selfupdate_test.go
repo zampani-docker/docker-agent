@@ -414,7 +414,7 @@ func TestLatestReleaseAuthHeader(t *testing.T) {
 }
 
 func TestCleanupRemovesBackup(t *testing.T) {
-	backup := filepath.Join(t.TempDir(), "backup")
+	backup := filepath.Join(t.TempDir(), backupFilePrefix+"123")
 	require.NoError(t, os.WriteFile(backup, []byte("old"), 0o755))
 	t.Setenv(envBackupMarker, backup)
 
@@ -422,6 +422,30 @@ func TestCleanupRemovesBackup(t *testing.T) {
 
 	_, err := os.Stat(backup)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestCleanupIgnoresForeignBackupPath(t *testing.T) {
+	// A path that does not look like one of our backups must never be removed,
+	// even if pointed at by the environment variable.
+	victim := filepath.Join(t.TempDir(), "important.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o644))
+	t.Setenv(envBackupMarker, victim)
+
+	Cleanup(t.Context())
+
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err, "foreign path must not be deleted")
+	assert.Equal(t, "keep", string(got))
+}
+
+func TestIsOwnedBackupPath(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, isOwnedBackupPath("/tmp/"+backupFilePrefix+"abc"))
+	assert.True(t, isOwnedBackupPath(backupFilePrefix+"abc"))
+	assert.False(t, isOwnedBackupPath("/tmp/important.txt"))
+	assert.False(t, isOwnedBackupPath("/etc/passwd"))
+	assert.False(t, isOwnedBackupPath(""))
 }
 
 func TestSwapBinary(t *testing.T) {
