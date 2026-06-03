@@ -1136,10 +1136,6 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 			return nil
 		}
 
-		if truncated {
-			return fs.SkipAll
-		}
-
 		// Check VCS ignore rules
 		if t.shouldIgnorePath(path) {
 			if d.IsDir() {
@@ -1168,17 +1164,20 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 			return nil
 		}
 
-		// Skip files too large to scan safely. Reading them whole would
-		// spike memory (content + string copy + line split) for what is
-		// almost always a binary or data dump.
-		if info, statErr := d.Info(); statErr == nil && info.Size() > maxSearchFileSize {
-			return nil
-		}
-
 		// Check this file against allow/deny lists before reading.
 		// This prevents symlinks inside the allowed root from escaping the sandbox.
 		if _, checkErr := t.resolveAndCheckPath(path); checkErr != nil {
 			// Skip files outside the sandbox silently (don't fail the whole search).
+			return nil
+		}
+
+		// Only scan regular files within the size limit. We stat (following
+		// symlinks) rather than trust d.Info()'s lstat: t.readFile follows
+		// symlinks, so measuring the link itself would let a symlink to a
+		// huge file slip past the guard. Skipping non-regular files also
+		// avoids reading forever from a device or FIFO such as /dev/zero.
+		info, statErr := t.stat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() > maxSearchFileSize {
 			return nil
 		}
 

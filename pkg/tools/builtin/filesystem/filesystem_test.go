@@ -540,6 +540,33 @@ func TestFilesystemTool_SearchFilesContent_SkipsLargeFiles(t *testing.T) {
 	assert.NotContains(t, result.Output, "big.bin")
 }
 
+// TestFilesystemTool_SearchFilesContent_SkipsSymlinkToLargeFile is a
+// regression test for the size guard: a symlink reports its own tiny size
+// via lstat, but readFile follows it. The guard must stat the target so a
+// symlink pointing at an over-limit file is skipped rather than read whole.
+func TestFilesystemTool_SearchFilesContent_SkipsSymlinkToLargeFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "small.txt"), []byte("findme\n"), 0o644))
+
+	bigTarget := filepath.Join(tmpDir, "target.bin")
+	big := make([]byte, maxSearchFileSize+1)
+	copy(big, "findme\n")
+	require.NoError(t, os.WriteFile(bigTarget, big, 0o644))
+	require.NoError(t, os.Symlink(bigTarget, filepath.Join(tmpDir, "link.txt")))
+
+	result, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "findme",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "small.txt")
+	assert.NotContains(t, result.Output, "link.txt")
+	assert.NotContains(t, result.Output, "target.bin")
+}
+
 func TestFilesystemTool_PostEditCommands(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
