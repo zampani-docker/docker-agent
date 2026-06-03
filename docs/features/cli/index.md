@@ -386,6 +386,9 @@ Manage agent aliases for quick access.
 # List aliases
 $ docker agent alias ls
 
+# List aliases as JSON
+$ docker agent alias list --json
+
 # Add an alias
 $ docker agent alias add pirate /path/to/pirate.yaml
 $ docker agent alias add other ociReference
@@ -420,6 +423,32 @@ Registered aliases (3):
 
 Run an alias with: docker agent run <alias>
 ```
+
+Pass `--json` to output aliases as a JSON array instead of the formatted table. Each entry includes the alias `name` and its options:
+
+```bash
+$ docker agent alias list --json
+[
+  {
+    "name": "fast-coder",
+    "path": "agentcatalog/coder",
+    "model": "openai/gpt-4o-mini"
+  },
+  {
+    "name": "turbo",
+    "path": "agentcatalog/coder",
+    "yolo": true,
+    "model": "anthropic/claude-sonnet-4-5"
+  },
+  {
+    "name": "yolo-coder",
+    "path": "agentcatalog/coder",
+    "yolo": true
+  }
+]
+```
+
+JSON output is sorted by name and omits false/zero-valued fields. This is useful for scripting and automation.
 
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">Override alias options
