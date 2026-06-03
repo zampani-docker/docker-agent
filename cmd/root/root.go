@@ -237,16 +237,25 @@ func visitAll(cmd *cobra.Command, fn func(*cobra.Command)) {
 // handshake, shell-completion script generation, and the version/help queries.
 // Updating mid-handshake would corrupt the plugin protocol, and restarting a
 // completion call would be surprising.
+//
+// Help and version are detected anywhere in args, not just at args[0], so that
+// per-subcommand help (e.g. "run --help") is also skipped.
 func isManagementInvocation(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	switch args[0] {
-	case metadata.MetadataSubcommandName, cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "completion", "version", "help", "--help", "-h", "--version":
+	case metadata.MetadataSubcommandName, cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "completion", "version", "help", "--version":
 		return true
-	default:
-		return false
 	}
+	// A help request can appear after a subcommand ("run --help"); never update
+	// just to print help text.
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
 }
 
 // setupLogging configures slog logging behavior.

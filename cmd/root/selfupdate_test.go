@@ -21,6 +21,9 @@ func TestIsManagementInvocation(t *testing.T) {
 		{"--help"},
 		{"-h"},
 		{"--version"},
+		{"run", "--help"},
+		{"run", "agent.yaml", "-h"},
+		{"share", "push", "--help"},
 	} {
 		assert.True(t, isManagementInvocation(args), "args %v", args)
 	}
