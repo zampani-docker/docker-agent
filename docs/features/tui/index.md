@@ -73,6 +73,8 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/speak`           | Voice input via system speech-to-text (macOS only)                                   |
 | `/exit`            | Exit the application (aliases: `/quit`, `/q`)                                        |
 
+Slash commands (both built-in and named) execute immediately when entered. Regular chat messages are queued and processed in order. This means you can invoke a slash command to interrupt or direct the agent even while it is mid-response.
+
 ### Thinking and Tool Details
 
 Reasoning/thinking blocks are collapsed by default. When collapsed, the TUI shows a short preview and compact tool summaries. Expand a block to see the full thinking content and the real tool renderers, including detailed tool output such as file edit diffs.

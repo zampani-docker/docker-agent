@@ -393,7 +393,7 @@ agents:
     use_commands: [ci]        # same group, reused without duplication
 ```
 
-See [`examples/shared-commands-skills.yaml`](https://github.com/docker/cagent/blob/main/examples/shared-commands-skills.yaml) for a complete example.
+See [`examples/shared-commands-skills.yaml`](https://github.com/docker/docker-agent/blob/main/examples/shared-commands-skills.yaml) for a complete example.
 
 ## Custom Providers Section
 

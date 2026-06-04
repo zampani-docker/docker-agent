@@ -34,6 +34,8 @@ agents:
     max_old_tool_call_tokens: int # Optional: token budget for old tool call content
     num_history_items: int # Optional: limit conversation history
     skills: boolean | [list] # Optional: enable skill discovery (true/false or list of names and/or sources)
+    use_commands: [list] # Optional: names of top-level commands groups to merge into this agent
+    use_skills: [list] # Optional: names of top-level skills groups to merge into this agent
     commands: # Optional: named prompts
       name: "prompt text" # or {instruction: "prompt", agent: "sub_agent_name"}
     welcome_message: string # Optional: message shown at session start
@@ -92,6 +94,8 @@ agents:
 | `num_history_items`         | int     | ✗        | Limit the number of conversation history messages sent to the model. Useful for managing context window size with long conversations. Default: unlimited (all messages sent). |
 | `skills`                    | bool/array | ✗     | Enable automatic skill discovery. `true` loads all discovered local skills, `false` disables them. A list can mix skill sources (`local` or `https://…` URLs) and skill names to include — see [Skills]({{ '/features/skills/' | relative_url }}).                                                     |
 | `commands`                  | object  | ✗        | Named prompts that can be run with `docker agent run config.yaml /command_name`. Can be simple strings or objects with `instruction` and/or `agent` fields for agent switching. See [Named Commands](#named-commands) below. |
+| `use_commands`              | list of string | ✗   | Names of top-level `commands` groups to merge into this agent. Inline `commands` entries take precedence on name conflicts. Default: `[]`. |
+| `use_skills`                | list of string | ✗   | Names of top-level `skills` groups to merge into this agent. Inline skills are deduplicated by name against merged entries. Default: `[]`. |
 | `welcome_message`           | string  | ✗        | Message displayed to the user when a session starts. Rendered as Markdown in the TUI. **Not sent to the model** — it exists purely for the user's benefit. Useful for telling users what the agent can do and what commands are available. |
 | `handoffs`                  | array   | ✗        | List of agent names this agent can hand off the conversation to. Enables the `handoff` tool. See [Handoffs Routing]({{ '/concepts/multi-agent/#handoffs-routing' | relative_url }}).                  |
 | `hooks`                     | object  | ✗        | Lifecycle hooks for running commands at various points. See [Hooks]({{ '/configuration/hooks/' | relative_url }}).                                                                                   |
@@ -259,6 +263,8 @@ agents:
 ## Named Commands
 
 Define reusable prompt shortcuts that can send prompts to the current agent or switch to a different sub-agent:
+
+> **Note:** Named slash commands execute immediately, even while the agent is processing another message. Unlike regular chat messages (which are queued), slash commands interrupt or direct the agent even while it is mid-response.
 
 ```yaml
 agents:
