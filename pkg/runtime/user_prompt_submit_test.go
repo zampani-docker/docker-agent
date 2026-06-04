@@ -58,6 +58,68 @@ func TestUserPromptSubmitSkippedForSubSessions(t *testing.T) {
 			"their kick-off message is synthesised by the runtime, not authored by a human")
 }
 
+// TestUserSteeringMessagesSubmitFiresOnDrain pins the contract that
+// user_steering_messages_submit fires when the runtime drains the
+// steering queue, and that the hook receives the drained messages via
+// Input.SteeringMessages. Enqueuing before RunStream exercises the
+// idle/first-turn drain site, which is the one user_prompt_submit does
+// NOT cover.
+func TestUserSteeringMessagesSubmitFiresOnDrain(t *testing.T) {
+	t.Parallel()
+
+	const counterName = "test-user-steering-submit-counter"
+	var calls atomic.Int32
+	var seen atomic.Value
+
+	stream := newStreamBuilder().
+		AddContent("ok").
+		AddStopWithUsage(3, 2).
+		Build()
+	prov := &mockProvider{id: "test/mock-model", stream: stream}
+
+	root := agent.New("root", "test agent",
+		agent.WithModel(prov),
+		agent.WithHooks(&latest.HooksConfig{
+			UserSteeringMessagesSubmit: []latest.HookDefinition{
+				{Type: "builtin", Command: counterName},
+			},
+		}),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, rt.hooksRegistry.RegisterBuiltin(
+		counterName,
+		func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+			calls.Add(1)
+			seen.Store(append([]string(nil), in.SteeringMessages...))
+			return nil, nil
+		},
+	))
+
+	// Enqueue before RunStream so the messages are drained at the
+	// idle/first-turn drain site at the top of the run loop.
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "steer one"}))
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "steer two"}))
+
+	sess := session.New()
+	sess.Title = "Unit Test"
+
+	for range rt.RunStream(t.Context(), sess) {
+	}
+
+	assert.Equal(t, int32(1), calls.Load(),
+		"user_steering_messages_submit must fire once for the drained batch")
+	got, _ := seen.Load().([]string)
+	assert.Equal(t, []string{"steer one", "steer two"}, got,
+		"hook must receive the drained messages via Input.SteeringMessages, in order")
+}
+
 // setupUserPromptSubmitCounter wires up a single-turn mock runtime with
 // a builtin user_prompt_submit hook that atomically increments the
 // returned counter on every dispatch. Both tests above share this

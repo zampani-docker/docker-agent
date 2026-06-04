@@ -2,6 +2,7 @@ package hooks_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -151,6 +152,39 @@ func TestUserPromptSubmitBlockProducesDenyResult(t *testing.T) {
 	assert.False(t, res.Allowed)
 	assert.Contains(t, res.Message, "do the dangerous thing",
 		"hook must see the user prompt via Input.Prompt")
+}
+
+// TestUserSteeringMessagesSubmitBlockProducesDenyResult pins the
+// contract for the user_steering_messages_submit event: a hook
+// returning decision="block" must produce Result.Allowed=false so the
+// runtime can stop the run after draining the steering queue, and the
+// drained messages must be visible via Input.SteeringMessages.
+func TestUserSteeringMessagesSubmitBlockProducesDenyResult(t *testing.T) {
+	t.Parallel()
+
+	r := hooks.NewRegistry()
+	require.NoError(t, r.RegisterBuiltin("steer_guard", func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+		return &hooks.Output{
+			Decision: hooks.DecisionBlockValue,
+			Reason:   "steering rejected: " + strings.Join(in.SteeringMessages, "|"),
+		}, nil
+	}))
+
+	exec := hooks.NewExecutorWithRegistry(&hooks.Config{
+		UserSteeringMessagesSubmit: []hooks.Hook{{
+			Type:    hooks.HookTypeBuiltin,
+			Command: "steer_guard",
+		}},
+	}, t.TempDir(), nil, r)
+
+	res, err := exec.Dispatch(t.Context(), hooks.EventUserSteeringMessagesSubmit, &hooks.Input{
+		SessionID:        "s",
+		SteeringMessages: []string{"wait", "do this instead"},
+	})
+	require.NoError(t, err)
+	assert.False(t, res.Allowed)
+	assert.Contains(t, res.Message, "do this instead",
+		"hook must see the drained steering messages via Input.SteeringMessages")
 }
 
 // TestPreCompactBlockProducesDenyResult pins the contract for the

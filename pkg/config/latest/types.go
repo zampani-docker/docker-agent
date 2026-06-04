@@ -1964,6 +1964,18 @@ type HooksConfig struct {
 	// runtime, not authored by the user.
 	UserPromptSubmit []HookDefinition `json:"user_prompt_submit,omitempty" yaml:"user_prompt_submit,omitempty"`
 
+	// UserSteeringMessagesSubmit hooks run once each time the runtime
+	// drains the steering queue and appends the queued user messages to
+	// the session — i.e. messages the user submitted while the agent was
+	// already working (mid-turn, after the model stopped, or while idle
+	// before the first model call). The drained messages are passed in
+	// the steering_messages field. Like user_prompt_submit, hooks can
+	// block the run (decision="block" / continue=false / exit code 2) or
+	// contribute additional_context that is spliced into the conversation
+	// as a transient system message for the steered turn only — it is NOT
+	// persisted to the session.
+	UserSteeringMessagesSubmit []HookDefinition `json:"user_steering_messages_submit,omitempty" yaml:"user_steering_messages_submit,omitempty"`
+
 	// TurnStart hooks run at the start of every agent turn (each model
 	// call). Their AdditionalContext is appended as transient system
 	// messages for that turn only — it is NOT persisted to the session,
@@ -2097,6 +2109,7 @@ func (h *HooksConfig) IsEmpty() bool {
 		len(h.PermissionRequest) == 0 &&
 		len(h.SessionStart) == 0 &&
 		len(h.UserPromptSubmit) == 0 &&
+		len(h.UserSteeringMessagesSubmit) == 0 &&
 		len(h.TurnStart) == 0 &&
 		len(h.TurnEnd) == 0 &&
 		len(h.BeforeLLMCall) == 0 &&
@@ -2245,6 +2258,13 @@ func (h *HooksConfig) Validate() error {
 	// Validate UserPromptSubmit hooks
 	for i, hook := range h.UserPromptSubmit {
 		if err := hook.validate("user_prompt_submit", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate UserSteeringMessagesSubmit hooks
+	for i, hook := range h.UserSteeringMessagesSubmit {
+		if err := hook.validate("user_steering_messages_submit", i); err != nil {
 			return err
 		}
 	}
