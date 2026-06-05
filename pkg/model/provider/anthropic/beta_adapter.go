@@ -17,8 +17,11 @@ type betaStreamAdapter struct {
 
 	trackUsage bool
 	toolCall   bool
-	toolID     string
 	stopReason anthropic.BetaStopReason
+	// toolIDByBlock maps a content block index to its tool_use block ID.
+	// See streamAdapter.toolIDByBlock for the same rationale (parallel
+	// tool calls require per-block routing of input_json deltas).
+	toolIDByBlock map[int64]string
 }
 
 // newBetaStreamAdapter creates a new Beta stream adapter
@@ -26,6 +29,7 @@ func (c *Client) newBetaStreamAdapter(stream *ssestream.Stream[anthropic.BetaRaw
 	return &betaStreamAdapter{
 		retryableStream: retryableStream[anthropic.BetaRawMessageStreamEventUnion]{stream: stream},
 		trackUsage:      trackUsage,
+		toolIDByBlock:   map[int64]string{},
 	}
 }
 
@@ -57,10 +61,13 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.BetaRawContentBlockStartEvent:
 		switch block := eventVariant.ContentBlock.AsAny().(type) {
 		case anthropic.BetaToolUseBlock:
-			a.toolID = block.ID
+			if a.toolIDByBlock == nil {
+				a.toolIDByBlock = map[int64]string{}
+			}
+			a.toolIDByBlock[eventVariant.Index] = block.ID
 			a.toolCall = true
 			toolCall := tools.ToolCall{
-				ID:   a.toolID,
+				ID:   block.ID,
 				Type: "function",
 				Function: tools.FunctionCall{
 					Name: block.Name,
@@ -85,7 +92,7 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		case anthropic.BetaInputJSONDelta:
 			inputBytes := deltaVariant.PartialJSON
 			toolCall := tools.ToolCall{
-				ID:   a.toolID,
+				ID:   a.toolIDByBlock[eventVariant.Index],
 				Type: "function",
 				Function: tools.FunctionCall{
 					Arguments: inputBytes,

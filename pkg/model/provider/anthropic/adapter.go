@@ -21,14 +21,20 @@ type streamAdapter struct {
 
 	trackUsage bool
 	toolCall   bool
-	toolID     string
 	stopReason anthropic.StopReason
+	// toolIDByBlock maps a content block index to its tool_use block ID.
+	// Anthropic emits each tool_use in its own content block; subsequent
+	// input_json_delta events carry the block index (not the tool ID), so
+	// we must remember the ID per block to route partial JSON correctly
+	// when multiple tool calls stream in parallel.
+	toolIDByBlock map[int64]string
 }
 
 func (c *Client) newStreamAdapter(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], trackUsage bool) *streamAdapter {
 	return &streamAdapter{
 		retryableStream: retryableStream[anthropic.MessageStreamEventUnion]{stream: stream},
 		trackUsage:      trackUsage,
+		toolIDByBlock:   map[int64]string{},
 	}
 }
 
@@ -93,10 +99,13 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.ContentBlockStartEvent:
 		switch block := eventVariant.ContentBlock.AsAny().(type) {
 		case anthropic.ToolUseBlock:
-			a.toolID = block.ID
+			if a.toolIDByBlock == nil {
+				a.toolIDByBlock = map[int64]string{}
+			}
+			a.toolIDByBlock[eventVariant.Index] = block.ID
 			a.toolCall = true
 			toolCall := tools.ToolCall{
-				ID:   a.toolID,
+				ID:   block.ID,
 				Type: "function",
 				Function: tools.FunctionCall{
 					Name: block.Name,
@@ -123,7 +132,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		case anthropic.InputJSONDelta:
 			inputBytes := deltaVariant.PartialJSON
 			toolCall := tools.ToolCall{
-				ID:   a.toolID,
+				ID:   a.toolIDByBlock[eventVariant.Index],
 				Type: "function",
 				Function: tools.FunctionCall{
 					Arguments: inputBytes,
