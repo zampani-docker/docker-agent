@@ -99,9 +99,6 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.ContentBlockStartEvent:
 		switch block := eventVariant.ContentBlock.AsAny().(type) {
 		case anthropic.ToolUseBlock:
-			if a.toolIDByBlock == nil {
-				a.toolIDByBlock = map[int64]string{}
-			}
 			a.toolIDByBlock[eventVariant.Index] = block.ID
 			a.toolCall = true
 			toolCall := tools.ToolCall{
