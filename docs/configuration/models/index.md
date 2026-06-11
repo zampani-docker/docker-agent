@@ -65,7 +65,7 @@ The `title_model` field lets a heavyweight primary model hand off the cheap
 title-generation call to a smaller, faster model:
 
 ```yaml
-model: anthropic/claude-opus-4-5
+model: anthropic/claude-opus-4-7
 title_model: anthropic/claude-haiku-4-5
 ```
 
