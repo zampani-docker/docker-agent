@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -251,4 +252,60 @@ func TestListGatewayModels_CachesFailure(t *testing.T) {
 	require.Error(t, err)
 
 	assert.Equal(t, int32(1), requests.Load(), "failures must be cached to avoid hammering the gateway")
+}
+
+func TestListGatewayModels_ConcurrentCallersCoalesce(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		<-release
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/gpt-4o"}]}`))
+	}))
+	defer server.Close()
+
+	r := gatewayRuntime(server.URL, stubModelStore{})
+
+	const callers = 8
+	var wg sync.WaitGroup
+	results := make([][]string, callers)
+	for i := range callers {
+		wg.Go(func() {
+			results[i], _ = r.listGatewayModels(t.Context())
+		})
+	}
+
+	// Let all goroutines reach the fetch, then release the single
+	// in-flight request they should all be coalesced onto.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), requests.Load(), "concurrent callers must coalesce on one in-flight request")
+	for i := range callers {
+		assert.Equal(t, []string{"openai/gpt-4o"}, results[i])
+	}
+}
+
+func TestAvailableModels_GatewayEmbeddingFilteredByCatalogFamily(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/some-vector-model"},{"id":"openai/gpt-4o"}]}`))
+	}))
+	defer server.Close()
+
+	// The model ID contains no "embed" substring; only the catalog
+	// Family identifies it as an embedding model.
+	store := stubModelStore{models: map[string]*modelsdev.Model{
+		"openai/some-vector-model": {Name: "Vector", Family: "text-embedding"},
+	}}
+	r := gatewayRuntime(server.URL, store)
+
+	got := refs(r.AvailableModels(t.Context()))
+
+	assert.NotContains(t, got, "openai/some-vector-model", "embedding models identified by catalog family must be filtered")
+	assert.Contains(t, got, "openai/gpt-4o")
 }

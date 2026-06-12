@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/modelsgateway"
@@ -20,9 +22,13 @@ const gatewayModelsTTL = 5 * time.Minute
 
 // gatewayModelsCache memoizes the result of the gateway model discovery,
 // including failures, so an unsupported or slow gateway is not re-queried
-// on every picker open.
+// on every picker open. The mutex only guards the cached fields; the
+// network fetch itself runs outside the lock, coalesced by the
+// singleflight group so concurrent callers share one in-flight request
+// instead of stalling on each other.
 type gatewayModelsCache struct {
 	mu        sync.Mutex
+	sf        singleflight.Group
 	ids       []string
 	err       error
 	fetchedAt time.Time
@@ -37,16 +43,26 @@ func (r *LocalRuntime) listGatewayModels(ctx context.Context) ([]string, error) 
 	}
 
 	c := &r.gatewayModels
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if !c.fetchedAt.IsZero() && now().Sub(c.fetchedAt) < gatewayModelsTTL {
-		return c.ids, c.err
+		ids, err := c.ids, c.err
+		c.mu.Unlock()
+		return ids, err
 	}
+	c.mu.Unlock()
 
-	c.ids, c.err = modelsgateway.ListModels(ctx, r.modelSwitcherCfg.ModelsGateway, r.modelSwitcherCfg.EnvProvider)
-	c.fetchedAt = now()
-	return c.ids, c.err
+	v, err, _ := c.sf.Do("models", func() (any, error) {
+		ids, err := modelsgateway.ListModels(ctx, r.modelSwitcherCfg.ModelsGateway, r.modelSwitcherCfg.EnvProvider)
+		c.mu.Lock()
+		c.ids, c.err, c.fetchedAt = ids, err, now()
+		c.mu.Unlock()
+		return ids, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]string), nil
 }
 
 // buildGatewayChoices builds ModelChoice entries from the models served by
@@ -86,7 +102,21 @@ func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, 
 		if _, err := latest.ParseModelRef(prov + "/" + model); err != nil {
 			continue
 		}
-		if isEmbeddingModel("", model) {
+
+		// Resolve catalog metadata before the embedding filter so the
+		// catalog Family (e.g. "text-embedding") is consulted even when
+		// the model ID itself doesn't contain "embed".
+		var meta *modelsdev.Model
+		if r.modelsStore != nil {
+			if m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(prov, model)); err == nil {
+				meta = m
+			}
+		}
+		family := ""
+		if meta != nil {
+			family = meta.Family
+		}
+		if isEmbeddingModel(family, model) {
 			continue
 		}
 
@@ -104,13 +134,11 @@ func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, 
 			IsCatalog: true,
 			IsGateway: true,
 		}
-		if r.modelsStore != nil {
-			if m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(prov, model)); err == nil && m != nil {
-				if m.Name != "" {
-					choice.Name = m.Name
-				}
-				applyCatalogMetadata(&choice, m)
+		if meta != nil {
+			if meta.Name != "" {
+				choice.Name = meta.Name
 			}
+			applyCatalogMetadata(&choice, meta)
 		}
 		choices = append(choices, choice)
 	}
