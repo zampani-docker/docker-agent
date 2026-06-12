@@ -695,7 +695,7 @@
       "readme": "http://desktop.docker.com/mcp/catalog/v3/readme/semgrep.md",
       "headers": {},
       "auth": {
-        "type": "none"
+        "type": "oauth"
       }
     },
     {
