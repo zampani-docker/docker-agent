@@ -289,6 +289,55 @@ func createAgentWithBuiltinTools(llm provider.Provider) *agent.Agent {
 }
 ```
 
+## HTTP Middleware / Transport Wrappers
+
+Use `options.WithHTTPTransportWrapper` to inject HTTP middleware into the transport chain of all provider clients built by docker-agent. This is useful for request tracing, injecting custom headers, collecting metrics, or any other cross-cutting concern at the HTTP layer.
+
+```go
+import (
+    "net/http"
+
+    "github.com/docker/docker-agent/pkg/model/provider/options"
+)
+
+type headerTransport struct {
+    base http.RoundTripper
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    req = req.Clone(req.Context())
+    req.Header.Set("X-Request-Source", "my-app")
+    return t.base.RoundTrip(req)
+}
+
+// Example: add a custom header to every outbound LLM request
+wrapper := options.WithHTTPTransportWrapper(
+    func(base http.RoundTripper) http.RoundTripper {
+        return &headerTransport{base: base}
+    },
+)
+
+client, err := openai.NewClient(ctx, &latest.ModelConfig{
+    Provider: "openai",
+    Model:    "gpt-4o",
+}, env, wrapper)
+```
+
+The wrapper receives the already-instrumented transport (OpenTelemetry, SSE decompression, Desktop proxy support) as its `base` argument, so wrapping it preserves all built-in behaviour.
+
+**Supported providers:** Anthropic, OpenAI, Gemini (GeminiAPI backend), Bedrock. Works in both direct and gateway/proxy mode.
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Vertex AI not supported
+</div>
+  <p>Vertex AI uses an ADC-managed HTTP client that docker-agent cannot intercept. When a transport wrapper is set, docker-agent falls back to the GeminiAPI backend instead of Vertex AI — a debug message is logged.</p>
+
+</div>
+
+In **gateway mode** the wrapper is called on every LLM request because gateway clients are rebuilt each call for short-lived auth tokens. In **direct mode** it is called once at client construction. Rate-limit responses (HTTP 429) are classified as non-retryable by the runtime and cause the model chain to skip to the next fallback, so wrappers that track per-request outcomes will observe these as failures rather than retried calls.
+
+Returning `nil` from your wrapper function is not allowed; docker-agent logs a warning and keeps the original transport instead.
+
 ## Using Different Providers
 
 ```go
