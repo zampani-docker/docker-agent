@@ -878,6 +878,59 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+// TestOAuthHTTPClientWithHeaders_StripsDefaultPort verifies that an explicit
+// standard port in the configured URL (e.g. https://host:443) is stripped
+// when building the host-scoping transport, so it matches the port-less
+// discovery URLs servers usually advertise instead of silently dropping the
+// headers. Guards the construction call site.
+func TestOAuthHTTPClientWithHeaders_StripsDefaultPort(t *testing.T) {
+	t.Parallel()
+
+	client := oauthHTTPClientWithHeaders("https://mcp.example.com:443/mcp",
+		map[string]string{"X-Grafana-URL": "https://instance.grafana.net/"}, false)
+	hst, ok := client.Transport.(*hostScopedHeaderTransport)
+	require.True(t, ok, "expected a host-scoped transport when headers are configured")
+	assert.Equal(t, "mcp.example.com", hst.host,
+		"a configured standard :443 port must be stripped so it matches port-less discovery URLs")
+}
+
+// TestHostScopedHeaderTransport_NormalizesRequestPort verifies the other side:
+// when the configured host omits the port but a server-advertised discovery
+// URL spells out :443, RoundTrip still routes through the header-bearing
+// transport. Guards the per-request normalisation in RoundTrip.
+func TestHostScopedHeaderTransport_NormalizesRequestPort(t *testing.T) {
+	t.Parallel()
+
+	var withHeadersCalled, baseCalled bool
+	mark := func(flag *bool) roundTripFunc {
+		return func(*http.Request) (*http.Response, error) {
+			*flag = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+	}
+
+	tr := &hostScopedHeaderTransport{
+		host:        "mcp.example.com", // configured without an explicit port
+		withHeaders: mark(&withHeadersCalled),
+		base:        mark(&baseCalled),
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		"https://mcp.example.com:443/.well-known/oauth-protected-resource", http.NoBody)
+	require.NoError(t, err)
+	resp, err := tr.RoundTrip(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.True(t, withHeadersCalled,
+		"a request that spells out :443 must route through the header-bearing transport when the configured host omits it")
+	assert.False(t, baseCalled, "must not fall through to the header-less branch")
+}
+
 func TestOAuthTransportCoalescesConcurrentAuthorization(t *testing.T) {
 	authMux := http.NewServeMux()
 	authSrv := httptest.NewServer(authMux)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -81,7 +82,7 @@ func oauthHTTPClientWithHeaders(rawURL string, headers map[string]string, allowP
 		Timeout:       base.Timeout,
 		CheckRedirect: base.CheckRedirect,
 		Transport: &hostScopedHeaderTransport{
-			host:        u.Host,
+			host:        hostWithoutDefaultPort(u.Host, u.Scheme),
 			withHeaders: upstream.NewHeaderTransport(inner, headers),
 			base:        inner,
 		},
@@ -100,10 +101,28 @@ type hostScopedHeaderTransport struct {
 }
 
 func (t *hostScopedHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.EqualFold(req.URL.Host, t.host) {
+	if strings.EqualFold(hostWithoutDefaultPort(req.URL.Host, req.URL.Scheme), t.host) {
 		return t.withHeaders.RoundTrip(req)
 	}
 	return t.base.RoundTrip(req)
+}
+
+// hostWithoutDefaultPort strips the scheme's default port from host so that
+// "mcp.example.com:443" and "mcp.example.com" compare equal under https
+// (likewise :80 under http). A non-default or absent port is left untouched.
+//
+// Both sides of the host-scoping comparison are normalised through this so
+// headers still flow when the configured URL and a server-advertised
+// discovery URL disagree on whether to spell out the standard port.
+func hostWithoutDefaultPort(host, scheme string) string {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return host // no port present
+	}
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		return h
+	}
+	return host
 }
 
 // GenerateState generates a random state parameter for OAuth CSRF protection
