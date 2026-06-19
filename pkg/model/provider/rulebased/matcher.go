@@ -26,9 +26,10 @@ type document struct {
 // handful of phrases in memory and find the best match for one query, so a
 // full-text search engine was overkill.
 type matcher struct {
-	docs    []document
-	docFreq map[string]int // term -> number of documents containing it
-	avgLen  float64
+	docs     []document
+	docFreq  map[string]int // term -> number of documents containing it
+	totalLen int            // sum of all document lengths
+	avgLen   float64
 }
 
 func newMatcher() *matcher {
@@ -53,11 +54,8 @@ func (m *matcher) add(routeIndex int, text string) {
 		length:     len(terms),
 	})
 
-	var total int
-	for _, doc := range m.docs {
-		total += doc.length
-	}
-	m.avgLen = float64(total) / float64(len(m.docs))
+	m.totalLen += len(terms)
+	m.avgLen = float64(m.totalLen) / float64(len(m.docs))
 }
 
 // bestRoute returns the route index of the highest-scoring document for the
