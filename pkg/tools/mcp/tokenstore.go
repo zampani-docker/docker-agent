@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -23,7 +24,7 @@ type OAuthTokenStoreFactory func() OAuthTokenStore
 
 var (
 	defaultStoreMu sync.Mutex
-	defaultStore   = sync.OnceValue(func() OAuthTokenStore { return NewInMemoryTokenStore() })
+	defaultStore   = sync.OnceValue(NewInMemoryTokenStore)
 )
 
 // SetDefaultTokenStoreFactory installs the process-wide persistent token-store
@@ -96,7 +97,7 @@ func ListOAuthTokens() ([]OAuthTokenEntry, error) {
 	store := NewKeyringTokenStore()
 	lister, ok := store.(oauthTokenLister)
 	if !ok {
-		return nil, fmt.Errorf("persistent OAuth token store not available")
+		return nil, errors.New("persistent OAuth token store not available")
 	}
 	return lister.ListOAuthTokens(), nil
 }

@@ -22,7 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/selfupdate"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
-	_ "github.com/docker/docker-agent/pkg/tools/mcp/keyringstore"
+	"github.com/docker/docker-agent/pkg/tools/mcp/keyringstore"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
@@ -172,6 +172,10 @@ We collect anonymous usage data to help improve docker agent. To disable:
 }
 
 func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+	// Back MCP OAuth with the OS keyring for the CLI. Embedders that don't
+	// import cmd/root keep the default in-memory store.
+	keyringstore.Register()
+
 	selfupdate.Cleanup(ctx)
 
 	// Opt-in self-update: when enabled, replace this binary with the latest

@@ -105,11 +105,10 @@ var defaultStore = sync.OnceValue(func() mcp.OAuthTokenStore {
 	return newKeyringTokenStore(ring, filepath.Join(paths.GetConfigDir(), tokenFileName))
 })
 
-func init() {
-	Register()
-}
-
-// Register installs the keyring-backed token store as the default for MCP OAuth.
+// Register installs the keyring-backed token store as the default for MCP
+// OAuth. The CLI calls this during startup; embedders that don't need
+// persistent keyring-backed storage can simply not call it and keep the
+// in-memory default.
 func Register() {
 	mcp.SetDefaultTokenStoreFactory(NewKeyringTokenStore)
 }
