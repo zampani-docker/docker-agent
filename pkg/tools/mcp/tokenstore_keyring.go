@@ -1,40 +1,67 @@
 package mcp
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/99designs/keyring"
+
+	"github.com/docker/docker-agent/pkg/paths"
 )
 
-// All OAuth tokens for all MCP servers are stored under a single keyring
-// item. On macOS each keychain item carries its own ACL, so storing N
-// tokens as N items would prompt the user N times the first time each is
-// read (and again whenever the binary's signature changes). Bundling them
-// collapses that to a single prompt — and a single "Always Allow"
-// decision — for any number of MCP servers.
+// OAuth tokens are encrypted with AES-256-GCM and written to a single file
+// on disk; the encryption key is the only thing kept in the OS keyring.
+//
+// This split solves two problems that the previous "everything in one
+// keyring item" layout could not solve at once:
+//
+//   - Size: keyring backends cap item size (Windows Credential Manager at
+//     2560 bytes, the Linux kernel keyring at a per-user quota). A bundle
+//     of several multi-kilobyte OAuth tokens easily blows past that. The
+//     key we store is a fixed 32 bytes, so it always fits; the unbounded
+//     token blob lives in a file instead.
+//   - Prompts: on macOS each keychain item carries its own ACL, so N items
+//     means N permission prompts (and re-prompts whenever the binary's
+//     signature changes). Keeping exactly one keyring item collapses that
+//     to a single prompt — and a single "Always Allow" — no matter how
+//     many MCP servers the user authorizes.
 const (
 	keyringServiceName = "docker-agent-oauth"
-	bundleKey          = "oauth:tokens"
 
-	// Items written by the previous one-token-per-item layout, migrated
-	// into the bundle on first load and then removed.
+	// encryptionKeyItem is the single keyring item we read/write: the
+	// AES-256 key that seals the on-disk token file.
+	encryptionKeyItem = "oauth:encryption-key"
+	encryptionKeySize = 32 // AES-256
+
+	// tokenFileName is the encrypted token bundle, stored under the config
+	// dir alongside other docker-agent state.
+	tokenFileName = "mcp-oauth-tokens.enc"
+
+	// Legacy keyring keys from the previous "bundle in the keyring"
+	// layout. Migrated into the encrypted file on first load, then removed.
+	legacyBundleKey   = "oauth:tokens"
 	legacyTokenPrefix = "oauth:"
 	legacyIndexKey    = "oauth:_index"
 )
 
-// KeyringTokenStore implements OAuthTokenStore by caching the bundled
-// keyring item in memory: the OAuth transport's hot path stays in memory
-// after the first hit, and writes always target the same keyring item so
-// the user's "Always Allow" decision keeps applying to refreshes and to
-// new MCP servers.
+// KeyringTokenStore keeps OAuth tokens in memory, sealing them to disk with
+// a key held in the OS keyring. The keyring is touched at most once per
+// process (to fetch or create the key), so the user's "Always Allow"
+// decision keeps applying to refreshes and to newly authorized servers.
 type KeyringTokenStore struct {
-	ring keyring.Keyring
+	ring     keyring.Keyring
+	filePath string
 
 	mu     sync.Mutex
 	cache  map[string]*OAuthToken
@@ -69,7 +96,7 @@ var defaultStore = sync.OnceValue(func() OAuthTokenStore {
 		slog.Warn("OS keyring not available, falling back to in-memory token store", "error", err)
 		return NewInMemoryTokenStore()
 	}
-	return newKeyringTokenStore(ring)
+	return newKeyringTokenStore(ring, filepath.Join(paths.GetConfigDir(), tokenFileName))
 })
 
 // NewKeyringTokenStore returns the process-wide token store backed by the
@@ -79,21 +106,23 @@ func NewKeyringTokenStore() OAuthTokenStore {
 	return defaultStore()
 }
 
-// newKeyringTokenStore wraps an arbitrary keyring with the bundle-and-cache
-// store. Used by tests to inject keyring.NewArrayKeyring().
-func newKeyringTokenStore(ring keyring.Keyring) *KeyringTokenStore {
+// newKeyringTokenStore wraps a keyring and an on-disk file path with the
+// encrypt-and-cache store. Used by tests to inject keyring.NewArrayKeyring()
+// and a temp file.
+func newKeyringTokenStore(ring keyring.Keyring, filePath string) *KeyringTokenStore {
 	return &KeyringTokenStore{
-		ring:  ring,
-		cache: map[string]*OAuthToken{},
+		ring:     ring,
+		filePath: filePath,
+		cache:    map[string]*OAuthToken{},
 	}
 }
 
-// load fetches the bundled item from the keyring on first use and caches
-// it. Subsequent calls are no-ops, so methods can call load() at the top
-// of every operation without re-prompting the user. Failures are logged
-// but not propagated — an empty in-memory cache lets the OAuth flow
-// re-populate fresh tokens, and marking the cache loaded eagerly keeps a
-// denied access from snowballing into a prompt on every call.
+// load decrypts the on-disk token file on first use and caches it.
+// Subsequent calls are no-ops, so methods can call load() at the top of
+// every operation without re-touching the keyring. Failures are logged but
+// not propagated — an empty in-memory cache lets the OAuth flow re-populate
+// fresh tokens, and marking the cache loaded eagerly keeps a denied keyring
+// access from snowballing into a prompt on every call.
 //
 // Caller must hold s.mu.
 func (s *KeyringTokenStore) load() {
@@ -102,17 +131,23 @@ func (s *KeyringTokenStore) load() {
 	}
 	s.loaded = true
 
-	item, err := s.ring.Get(bundleKey)
+	key, err := s.encryptionKey()
+	if err != nil {
+		slog.Warn("Failed to obtain OAuth encryption key; using in-memory cache for this process", "error", err)
+		return
+	}
+
+	data, err := os.ReadFile(s.filePath)
 	switch {
 	case err == nil:
-		if uerr := json.Unmarshal(item.Data, &s.cache); uerr != nil {
-			slog.Warn("OAuth token bundle is corrupt; starting fresh", "error", uerr)
+		if derr := s.decryptInto(key, data); derr != nil {
+			slog.Warn("OAuth token file is corrupt; starting fresh", "error", derr)
 			s.cache = map[string]*OAuthToken{}
 		}
-	case errors.Is(err, keyring.ErrKeyNotFound):
-		// Possibly an upgrade from the old per-token layout. Best-effort
-		// migration; failures here are silent so an upgrade is never
-		// worse than a fresh install.
+	case errors.Is(err, os.ErrNotExist):
+		// Possibly an upgrade from the old keyring-bundle layout. Best-effort
+		// migration; failures here are silent so an upgrade is never worse
+		// than a fresh install.
 		if migrated := s.migrateLegacyLocked(); migrated > 0 {
 			slog.Debug("Migrated legacy OAuth tokens", "count", migrated)
 			if perr := s.persistLocked(); perr != nil {
@@ -120,25 +155,89 @@ func (s *KeyringTokenStore) load() {
 			}
 		}
 	default:
-		slog.Warn("Failed to load OAuth tokens from keyring; using in-memory cache for this process", "error", err)
+		slog.Warn("Failed to read OAuth token file; using in-memory cache for this process", "error", err)
 	}
 }
 
-// migrateLegacyLocked folds tokens written by the old per-resource layout
-// into s.cache and deletes the legacy entries. Caller must hold s.mu.
-func (s *KeyringTokenStore) migrateLegacyLocked() int {
-	keys, err := s.ring.Keys()
+// encryptionKey fetches the AES key from the keyring, generating and
+// persisting a fresh one the first time. This is the only keyring access
+// the store performs.
+//
+// Caller must hold s.mu.
+func (s *KeyringTokenStore) encryptionKey() ([]byte, error) {
+	item, err := s.ring.Get(encryptionKeyItem)
+	switch {
+	case err == nil:
+		if len(item.Data) != encryptionKeySize {
+			return nil, fmt.Errorf("stored encryption key has wrong size %d", len(item.Data))
+		}
+		return item.Data, nil
+	case errors.Is(err, keyring.ErrKeyNotFound):
+		key := make([]byte, encryptionKeySize)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return nil, fmt.Errorf("failed to generate encryption key: %w", rerr)
+		}
+		if serr := s.ring.Set(keyring.Item{
+			Key:   encryptionKeyItem,
+			Data:  key,
+			Label: "Docker Agent OAuth Encryption Key",
+		}); serr != nil {
+			return nil, fmt.Errorf("failed to store encryption key: %w", serr)
+		}
+		return key, nil
+	default:
+		return nil, err
+	}
+}
+
+// decryptInto decrypts data into s.cache. The nonce is prepended to the
+// ciphertext. Caller must hold s.mu.
+func (s *KeyringTokenStore) decryptInto(key, data []byte) error {
+	gcm, err := newGCM(key)
 	if err != nil {
-		return 0
+		return err
+	}
+	if len(data) < gcm.NonceSize() {
+		return errors.New("token file too short")
+	}
+	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt token file: %w", err)
+	}
+	cache := map[string]*OAuthToken{}
+	if err := json.Unmarshal(plaintext, &cache); err != nil {
+		return fmt.Errorf("failed to unmarshal token bundle: %w", err)
+	}
+	s.cache = cache
+	return nil
+}
+
+// migrateLegacyLocked folds tokens written by the previous keyring-only
+// layouts (the single "oauth:tokens" bundle, or the even older
+// per-resource items) into s.cache and deletes the legacy keyring entries.
+// Caller must hold s.mu.
+func (s *KeyringTokenStore) migrateLegacyLocked() int {
+	// Newer legacy layout: a single JSON bundle under one keyring item.
+	if item, err := s.ring.Get(legacyBundleKey); err == nil {
+		bundle := map[string]*OAuthToken{}
+		if json.Unmarshal(item.Data, &bundle) == nil {
+			maps.Copy(s.cache, bundle)
+		}
+		_ = s.ring.Remove(legacyBundleKey)
 	}
 
-	var migrated int
+	// Oldest legacy layout: one keyring item per resource URL.
+	keys, err := s.ring.Keys()
+	if err != nil {
+		return len(s.cache)
+	}
 	for _, key := range keys {
 		if key == legacyIndexKey {
 			_ = s.ring.Remove(key)
 			continue
 		}
-		if key == bundleKey || !strings.HasPrefix(key, legacyTokenPrefix) {
+		if key == legacyBundleKey || key == encryptionKeyItem || !strings.HasPrefix(key, legacyTokenPrefix) {
 			continue
 		}
 
@@ -152,23 +251,76 @@ func (s *KeyringTokenStore) migrateLegacyLocked() int {
 		}
 		s.cache[strings.TrimPrefix(key, legacyTokenPrefix)] = &token
 		_ = s.ring.Remove(key)
-		migrated++
 	}
-	return migrated
+	return len(s.cache)
 }
 
-// persistLocked writes the in-memory bundle back to the keyring.
-// Caller must hold s.mu.
+// persistLocked encrypts the in-memory bundle and writes it atomically to
+// disk. Caller must hold s.mu.
 func (s *KeyringTokenStore) persistLocked() error {
-	data, err := json.Marshal(s.cache) //nolint:gosec // OAuth token bundle is intentionally serialized for keyring storage
+	key, err := s.encryptionKey()
+	if err != nil {
+		return err
+	}
+
+	plaintext, err := json.Marshal(s.cache) //nolint:gosec // OAuth token bundle is intentionally serialized for storage
 	if err != nil {
 		return fmt.Errorf("failed to marshal token bundle: %w", err)
 	}
-	return s.ring.Set(keyring.Item{
-		Key:   bundleKey,
-		Data:  data,
-		Label: "Docker Agent OAuth Tokens",
-	})
+
+	gcm, err := newGCM(key)
+	if err != nil {
+		return err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("failed to generate nonce: %w", err)
+	}
+	sealed := gcm.Seal(nonce, nonce, plaintext, nil)
+
+	if err := os.MkdirAll(filepath.Dir(s.filePath), 0o700); err != nil {
+		return fmt.Errorf("failed to create token directory: %w", err)
+	}
+	return atomicWrite(s.filePath, sealed)
+}
+
+func newGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+	return gcm, nil
+}
+
+// atomicWrite writes data to a temp file in the same directory and renames
+// it over the target, so a crash mid-write never leaves a truncated file.
+func atomicWrite(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".oauth-tokens-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to chmod temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("failed to rename token file: %w", err)
+	}
+	return nil
 }
 
 func (s *KeyringTokenStore) GetToken(resourceURL string) (*OAuthToken, error) {
