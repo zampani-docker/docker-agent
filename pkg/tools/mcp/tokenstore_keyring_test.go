@@ -227,6 +227,60 @@ func TestEncryptedStore_WritesTouchKeyringOnce(t *testing.T) {
 	}
 }
 
+func TestEncryptedStore_GetMissDoesNotCreateKeyringItem(t *testing.T) {
+	ring := keyring.NewArrayKeyring(nil)
+	store := newKeyringTokenStore(ring, filepath.Join(t.TempDir(), tokenFileName))
+
+	if _, err := store.GetToken("https://missing.example/mcp"); err == nil {
+		t.Fatal("expected missing token error")
+	}
+
+	keys, err := ring.Keys()
+	if err != nil {
+		t.Fatalf("Keys: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("missing-token lookup should not create keyring entries, got %v", keys)
+	}
+}
+
+func TestEncryptedStore_CrossProcessStoresMerge(t *testing.T) {
+	ring := keyring.NewArrayKeyring(nil)
+	path := filepath.Join(t.TempDir(), tokenFileName)
+
+	processA := newKeyringTokenStore(ring, path)
+	processB := newKeyringTokenStore(ring, path)
+
+	if err := processA.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: "a"}); err != nil {
+		t.Fatalf("processA initial StoreToken: %v", err)
+	}
+	// Process B loads the same initial state before A writes again.
+	if _, err := processB.GetToken("https://a.example/mcp"); err != nil {
+		t.Fatalf("processB load: %v", err)
+	}
+	if err := processA.StoreToken("https://c.example/mcp", &OAuthToken{AccessToken: "c"}); err != nil {
+		t.Fatalf("processA second StoreToken: %v", err)
+	}
+	if err := processB.StoreToken("https://b.example/mcp", &OAuthToken{AccessToken: "b"}); err != nil {
+		t.Fatalf("processB StoreToken: %v", err)
+	}
+
+	fresh := newKeyringTokenStore(ring, path)
+	for url, want := range map[string]string{
+		"https://a.example/mcp": "a",
+		"https://b.example/mcp": "b",
+		"https://c.example/mcp": "c",
+	} {
+		got, err := fresh.GetToken(url)
+		if err != nil {
+			t.Fatalf("GetToken(%s): %v", url, err)
+		}
+		if got.AccessToken != want {
+			t.Errorf("AccessToken for %s = %q, want %q", url, got.AccessToken, want)
+		}
+	}
+}
+
 // TestEncryptedStore_KeyringHoldsOnlyTheKey verifies that no matter how
 // many resource URLs are stored, the keyring holds exactly one item: the
 // encryption key. The tokens themselves live in the file, so macOS only
@@ -379,6 +433,31 @@ func TestEncryptedStore_LegacyPerTokenMigration(t *testing.T) {
 	}
 }
 
+func TestEncryptedStore_LegacyBundleWinsOverPerTokenMigration(t *testing.T) {
+	ring := keyring.NewArrayKeyring(nil)
+	path := filepath.Join(t.TempDir(), tokenFileName)
+	const url = "https://legacy.example/mcp"
+
+	seedLegacyToken(t, ring, url, &OAuthToken{AccessToken: "old-per-token"})
+	bundleData, err := json.Marshal(map[string]*OAuthToken{
+		url: {AccessToken: "new-bundle"},
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy bundle: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: legacyBundleKey, Data: bundleData}); err != nil {
+		t.Fatalf("seed legacy bundle: %v", err)
+	}
+
+	got, err := newKeyringTokenStore(ring, path).GetToken(url)
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if got.AccessToken != "new-bundle" {
+		t.Fatalf("AccessToken = %q, want newer bundle token", got.AccessToken)
+	}
+}
+
 func seedLegacyToken(t *testing.T, ring keyring.Keyring, url string, tok *OAuthToken) {
 	t.Helper()
 	data, err := json.Marshal(tok)
@@ -408,17 +487,8 @@ func TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure(t *testing.T) {
 		t.Fatalf("seed legacy bundle: %v", err)
 	}
 
-	// Point the store at a file inside a read-only directory: reading the
-	// (absent) file still reports os.ErrNotExist so migration runs, but the
-	// atomic write into the read-only directory fails.
-	roDir := filepath.Join(t.TempDir(), "ro")
-	if err := os.Mkdir(roDir, 0o500); err != nil {
-		t.Fatalf("mkdir ro: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) }) // let TempDir cleanup remove it
-	path := filepath.Join(roDir, tokenFileName)
-
-	store := newKeyringTokenStore(ring, path)
+	store := newKeyringTokenStore(ring, filepath.Join(t.TempDir(), tokenFileName))
+	store.write = func(string, []byte) error { return errors.New("simulated persist failure") }
 
 	// The token is still served from the in-memory cache for this session.
 	got, err := store.GetToken("https://legacy-a.example/mcp")
@@ -433,6 +503,19 @@ func TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure(t *testing.T) {
 	// can retry the migration.
 	if _, err := ring.Get(legacyBundleKey); err != nil {
 		t.Errorf("legacy bundle must survive a failed persist so migration can retry, got: %v", err)
+	}
+}
+
+func TestEncryptedStore_StoreRefusesAfterUnreadableFile(t *testing.T) {
+	ring := keyring.NewArrayKeyring(nil)
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	store := newKeyringTokenStore(ring, filepath.Join(blocker, tokenFileName))
+
+	if err := store.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: "a"}); err == nil {
+		t.Fatal("StoreToken should refuse to overwrite after unreadable token file")
 	}
 }
 

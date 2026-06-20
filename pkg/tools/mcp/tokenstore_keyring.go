@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/99designs/keyring"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -62,11 +64,13 @@ const (
 type KeyringTokenStore struct {
 	ring     keyring.Keyring
 	filePath string
+	write    func(string, []byte) error
 
-	mu     sync.Mutex
-	cache  map[string]*OAuthToken
-	key    []byte // cached encryption key; fetched from the keyring once
-	loaded bool
+	mu      sync.Mutex
+	cache   map[string]*OAuthToken
+	key     []byte // cached encryption key; fetched from the keyring once
+	loaded  bool
+	loadErr error
 }
 
 func openKeyring() (keyring.Keyring, error) {
@@ -114,6 +118,7 @@ func newKeyringTokenStore(ring keyring.Keyring, filePath string) *KeyringTokenSt
 	return &KeyringTokenStore{
 		ring:     ring,
 		filePath: filePath,
+		write:    writeTokenFile,
 		cache:    map[string]*OAuthToken{},
 	}
 }
@@ -132,15 +137,14 @@ func (s *KeyringTokenStore) load() {
 	}
 	s.loaded = true
 
-	key, err := s.encryptionKey()
-	if err != nil {
-		slog.Warn("Failed to obtain OAuth encryption key; using in-memory cache for this process", "error", err)
-		return
-	}
-
 	data, err := os.ReadFile(s.filePath)
 	switch {
 	case err == nil:
+		key, kerr := s.encryptionKey()
+		if kerr != nil {
+			slog.Warn("Failed to obtain OAuth encryption key; using in-memory cache for this process", "error", kerr)
+			return
+		}
 		if derr := s.decryptInto(key, data); derr != nil {
 			slog.Warn("OAuth token file is corrupt; starting fresh", "error", derr)
 			s.cache = map[string]*OAuthToken{}
@@ -151,7 +155,8 @@ func (s *KeyringTokenStore) load() {
 		// than a fresh install.
 		s.migrateLegacyLocked()
 	default:
-		slog.Warn("Failed to read OAuth token file; using in-memory cache for this process", "error", err)
+		s.loadErr = fmt.Errorf("failed to read OAuth token file: %w", err)
+		slog.Warn("Failed to read OAuth token file; refusing to overwrite it", "error", err)
 	}
 }
 
@@ -227,6 +232,18 @@ func (s *KeyringTokenStore) decryptInto(key, data []byte) error {
 //
 // Caller must hold s.mu.
 func (s *KeyringTokenStore) migrateLegacyLocked() {
+	unlock, err := lockTokenFile(s.filePath)
+	if err != nil {
+		slog.Warn("Failed to lock OAuth token file for migration; leaving legacy keyring entries in place for retry", "error", err)
+		return
+	}
+	defer unlock()
+
+	if err := s.reloadFromDiskLocked(); err != nil {
+		slog.Warn("Failed to reload OAuth token file during migration; leaving legacy keyring entries in place for retry", "error", err)
+		return
+	}
+
 	legacyKeys := s.collectLegacyTokensLocked()
 	if len(legacyKeys) == 0 {
 		return
@@ -250,40 +267,50 @@ func (s *KeyringTokenStore) migrateLegacyLocked() {
 // Caller must hold s.mu.
 func (s *KeyringTokenStore) collectLegacyTokensLocked() []string {
 	var legacyKeys []string
+	legacyTokens := map[string]*OAuthToken{}
 
-	// Newer legacy layout: a single JSON bundle under one keyring item.
+	// Oldest legacy layout: one keyring item per resource URL.
+	keys, err := s.ring.Keys()
+	if err == nil {
+		for _, key := range keys {
+			if key == legacyIndexKey {
+				legacyKeys = append(legacyKeys, key)
+				continue
+			}
+			if key == legacyBundleKey || key == encryptionKeyItem || !strings.HasPrefix(key, legacyTokenPrefix) {
+				continue
+			}
+
+			item, err := s.ring.Get(key)
+			if err != nil {
+				continue
+			}
+			var token OAuthToken
+			if json.Unmarshal(item.Data, &token) != nil {
+				continue
+			}
+			legacyTokens[strings.TrimPrefix(key, legacyTokenPrefix)] = &token
+			legacyKeys = append(legacyKeys, key)
+		}
+	}
+
+	// Newer legacy layout: a single JSON bundle under one keyring item. It
+	// intentionally wins over per-resource items for the same URL.
 	if item, err := s.ring.Get(legacyBundleKey); err == nil {
 		bundle := map[string]*OAuthToken{}
 		if json.Unmarshal(item.Data, &bundle) == nil {
-			maps.Copy(s.cache, bundle)
+			maps.Copy(legacyTokens, bundle)
 		}
 		legacyKeys = append(legacyKeys, legacyBundleKey)
 	}
 
-	// Oldest legacy layout: one keyring item per resource URL.
-	keys, err := s.ring.Keys()
-	if err != nil {
-		return legacyKeys
-	}
-	for _, key := range keys {
-		if key == legacyIndexKey {
-			legacyKeys = append(legacyKeys, key)
-			continue
+	// The encrypted file is the newest source of truth. Legacy tokens only
+	// fill gaps, which prevents a stale legacy entry from overwriting a token
+	// another process just persisted while this process was starting.
+	for url, token := range legacyTokens {
+		if _, exists := s.cache[url]; !exists {
+			s.cache[url] = token
 		}
-		if key == legacyBundleKey || key == encryptionKeyItem || !strings.HasPrefix(key, legacyTokenPrefix) {
-			continue
-		}
-
-		item, err := s.ring.Get(key)
-		if err != nil {
-			continue
-		}
-		var token OAuthToken
-		if json.Unmarshal(item.Data, &token) != nil {
-			continue
-		}
-		s.cache[strings.TrimPrefix(key, legacyTokenPrefix)] = &token
-		legacyKeys = append(legacyKeys, key)
 	}
 	return legacyKeys
 }
@@ -311,10 +338,50 @@ func (s *KeyringTokenStore) persistLocked() error {
 	}
 	sealed := gcm.Seal(nonce, nonce, plaintext, nil)
 
-	if err := os.MkdirAll(filepath.Dir(s.filePath), 0o700); err != nil {
+	if err := ensurePrivateDir(filepath.Dir(s.filePath)); err != nil {
+		return err
+	}
+	return s.write(s.filePath, sealed)
+}
+
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("failed to create token directory: %w", err)
 	}
-	return atomicWrite(s.filePath, sealed)
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // directory needs execute bit; 0700 is owner-only
+		return fmt.Errorf("failed to secure token directory: %w", err)
+	}
+	return nil
+}
+
+// reloadFromDiskLocked refreshes s.cache from the encrypted file while the
+// caller holds both s.mu and the cross-process file lock. A missing file is
+// not an error; a corrupt file is treated as empty so StoreToken can recover
+// by writing a fresh encrypted bundle.
+func (s *KeyringTokenStore) reloadFromDiskLocked() error {
+	data, err := os.ReadFile(s.filePath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to read OAuth token file: %w", err)
+	}
+	key, err := s.encryptionKey()
+	if err != nil {
+		return err
+	}
+	if err := s.decryptInto(key, data); err != nil {
+		slog.Warn("OAuth token file is corrupt; overwriting with fresh token bundle", "error", err)
+		s.cache = map[string]*OAuthToken{}
+	}
+	return nil
+}
+
+func writeTokenFile(path string, data []byte) error {
+	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return atomicfile.Write(path, bytes.NewReader(data), 0o600)
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
@@ -327,33 +394,6 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 	return gcm, nil
-}
-
-// atomicWrite writes data to a temp file in the same directory and renames
-// it over the target, so a crash mid-write never leaves a truncated file.
-func atomicWrite(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".oauth-tokens-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to chmod temp file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("failed to rename token file: %w", err)
-	}
-	return nil
 }
 
 func (s *KeyringTokenStore) GetToken(resourceURL string) (*OAuthToken, error) {
@@ -372,6 +412,18 @@ func (s *KeyringTokenStore) StoreToken(resourceURL string, token *OAuthToken) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.load()
+	if s.loadErr != nil {
+		return s.loadErr
+	}
+
+	unlock, err := lockTokenFile(s.filePath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.reloadFromDiskLocked(); err != nil {
+		return err
+	}
 
 	s.cache[resourceURL] = token
 	return s.persistLocked()
@@ -381,6 +433,18 @@ func (s *KeyringTokenStore) RemoveToken(resourceURL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.load()
+	if s.loadErr != nil {
+		return s.loadErr
+	}
+
+	unlock, err := lockTokenFile(s.filePath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.reloadFromDiskLocked(); err != nil {
+		return err
+	}
 
 	if _, ok := s.cache[resourceURL]; !ok {
 		return nil
