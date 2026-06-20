@@ -200,6 +200,33 @@ func TestEncryptedStore_ReadsTouchKeyringOnce(t *testing.T) {
 	}
 }
 
+// TestEncryptedStore_WritesTouchKeyringOnce verifies repeated writes within
+// a process reuse the cached encryption key rather than re-fetching it from
+// the keyring on every persist.
+func TestEncryptedStore_WritesTouchKeyringOnce(t *testing.T) {
+	ring := newCountingKeyring()
+	path := filepath.Join(t.TempDir(), tokenFileName)
+	store := newKeyringTokenStore(ring, path)
+
+	for i := range 5 {
+		url := fmt.Sprintf("https://server-%d.example/mcp", i)
+		if err := store.StoreToken(url, &OAuthToken{AccessToken: "at"}); err != nil {
+			t.Fatalf("StoreToken(%s): %v", url, err)
+		}
+	}
+	if err := store.RemoveToken("https://server-0.example/mcp"); err != nil {
+		t.Fatalf("RemoveToken: %v", err)
+	}
+
+	// The encryption key is fetched and created once on the first
+	// operation; every subsequent write must reuse the cached key and not
+	// touch the encryption-key item again. (The one-time Set is the key
+	// creation.)
+	if ring.sets != 1 {
+		t.Errorf("expected exactly 1 keyring Set (key creation) across many writes, got %d", ring.sets)
+	}
+}
+
 // TestEncryptedStore_KeyringHoldsOnlyTheKey verifies that no matter how
 // many resource URLs are stored, the keyring holds exactly one item: the
 // encryption key. The tokens themselves live in the file, so macOS only
@@ -360,6 +387,52 @@ func seedLegacyToken(t *testing.T, ring keyring.Keyring, url string, tok *OAuthT
 	}
 	if err := ring.Set(keyring.Item{Key: legacyTokenPrefix + url, Data: data}); err != nil {
 		t.Fatalf("seed legacy item: %v", err)
+	}
+}
+
+// TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure is the regression
+// test for the data-loss window: if the encrypted file cannot be written,
+// migration must NOT delete the legacy keyring entries, so a later process
+// can retry instead of leaving the user with no tokens at all.
+func TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure(t *testing.T) {
+	ring := keyring.NewArrayKeyring(nil)
+
+	bundle := map[string]*OAuthToken{
+		"https://legacy-a.example/mcp": {AccessToken: "legacy-a"},
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal legacy bundle: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: legacyBundleKey, Data: data}); err != nil {
+		t.Fatalf("seed legacy bundle: %v", err)
+	}
+
+	// Point the store at a file inside a read-only directory: reading the
+	// (absent) file still reports os.ErrNotExist so migration runs, but the
+	// atomic write into the read-only directory fails.
+	roDir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(roDir, 0o500); err != nil {
+		t.Fatalf("mkdir ro: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) }) // let TempDir cleanup remove it
+	path := filepath.Join(roDir, tokenFileName)
+
+	store := newKeyringTokenStore(ring, path)
+
+	// The token is still served from the in-memory cache for this session.
+	got, err := store.GetToken("https://legacy-a.example/mcp")
+	if err != nil {
+		t.Fatalf("GetToken after failed-persist migration: %v", err)
+	}
+	if got.AccessToken != "legacy-a" {
+		t.Errorf("AccessToken = %q, want %q", got.AccessToken, "legacy-a")
+	}
+
+	// The legacy bundle must still be in the keyring so the next process
+	// can retry the migration.
+	if _, err := ring.Get(legacyBundleKey); err != nil {
+		t.Errorf("legacy bundle must survive a failed persist so migration can retry, got: %v", err)
 	}
 }
 

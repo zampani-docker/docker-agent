@@ -65,6 +65,7 @@ type KeyringTokenStore struct {
 
 	mu     sync.Mutex
 	cache  map[string]*OAuthToken
+	key    []byte // cached encryption key; fetched from the keyring once
 	loaded bool
 }
 
@@ -145,33 +146,33 @@ func (s *KeyringTokenStore) load() {
 			s.cache = map[string]*OAuthToken{}
 		}
 	case errors.Is(err, os.ErrNotExist):
-		// Possibly an upgrade from the old keyring-bundle layout. Best-effort
+		// Possibly an upgrade from an older keyring-only layout. Best-effort
 		// migration; failures here are silent so an upgrade is never worse
 		// than a fresh install.
-		if migrated := s.migrateLegacyLocked(); migrated > 0 {
-			slog.Debug("Migrated legacy OAuth tokens", "count", migrated)
-			if perr := s.persistLocked(); perr != nil {
-				slog.Warn("Failed to persist migrated OAuth tokens", "error", perr)
-			}
-		}
+		s.migrateLegacyLocked()
 	default:
 		slog.Warn("Failed to read OAuth token file; using in-memory cache for this process", "error", err)
 	}
 }
 
 // encryptionKey fetches the AES key from the keyring, generating and
-// persisting a fresh one the first time. This is the only keyring access
-// the store performs.
+// persisting a fresh one the first time. The key is cached in memory after
+// the first call, so the keyring is touched at most once per process.
 //
 // Caller must hold s.mu.
 func (s *KeyringTokenStore) encryptionKey() ([]byte, error) {
+	if s.key != nil {
+		return s.key, nil
+	}
+
 	item, err := s.ring.Get(encryptionKeyItem)
 	switch {
 	case err == nil:
 		if len(item.Data) != encryptionKeySize {
 			return nil, fmt.Errorf("stored encryption key has wrong size %d", len(item.Data))
 		}
-		return item.Data, nil
+		s.key = item.Data
+		return s.key, nil
 	case errors.Is(err, keyring.ErrKeyNotFound):
 		key := make([]byte, encryptionKeySize)
 		if _, rerr := rand.Read(key); rerr != nil {
@@ -184,7 +185,8 @@ func (s *KeyringTokenStore) encryptionKey() ([]byte, error) {
 		}); serr != nil {
 			return nil, fmt.Errorf("failed to store encryption key: %w", serr)
 		}
-		return key, nil
+		s.key = key
+		return s.key, nil
 	default:
 		return nil, err
 	}
@@ -215,26 +217,57 @@ func (s *KeyringTokenStore) decryptInto(key, data []byte) error {
 
 // migrateLegacyLocked folds tokens written by the previous keyring-only
 // layouts (the single "oauth:tokens" bundle, or the even older
-// per-resource items) into s.cache and deletes the legacy keyring entries.
+// per-resource items) into s.cache, persists them to the encrypted file,
+// and only then removes the legacy keyring entries.
+//
+// The persist-before-delete ordering is deliberate: if the file write
+// fails we leave the legacy entries untouched so the next process can
+// retry, rather than deleting the only copy of the user's tokens. The
+// in-memory cache is still populated so the current session keeps working.
+//
 // Caller must hold s.mu.
-func (s *KeyringTokenStore) migrateLegacyLocked() int {
+func (s *KeyringTokenStore) migrateLegacyLocked() {
+	legacyKeys := s.collectLegacyTokensLocked()
+	if len(legacyKeys) == 0 {
+		return
+	}
+
+	if err := s.persistLocked(); err != nil {
+		slog.Warn("Failed to persist migrated OAuth tokens; leaving legacy keyring entries in place for retry", "error", err)
+		return
+	}
+	slog.Debug("Migrated legacy OAuth tokens", "count", len(s.cache))
+
+	for _, key := range legacyKeys {
+		_ = s.ring.Remove(key)
+	}
+}
+
+// collectLegacyTokensLocked reads tokens from both legacy keyring layouts
+// into s.cache and returns the keyring keys that should be removed once the
+// migration has been safely persisted. It does not mutate the keyring.
+//
+// Caller must hold s.mu.
+func (s *KeyringTokenStore) collectLegacyTokensLocked() []string {
+	var legacyKeys []string
+
 	// Newer legacy layout: a single JSON bundle under one keyring item.
 	if item, err := s.ring.Get(legacyBundleKey); err == nil {
 		bundle := map[string]*OAuthToken{}
 		if json.Unmarshal(item.Data, &bundle) == nil {
 			maps.Copy(s.cache, bundle)
 		}
-		_ = s.ring.Remove(legacyBundleKey)
+		legacyKeys = append(legacyKeys, legacyBundleKey)
 	}
 
 	// Oldest legacy layout: one keyring item per resource URL.
 	keys, err := s.ring.Keys()
 	if err != nil {
-		return len(s.cache)
+		return legacyKeys
 	}
 	for _, key := range keys {
 		if key == legacyIndexKey {
-			_ = s.ring.Remove(key)
+			legacyKeys = append(legacyKeys, key)
 			continue
 		}
 		if key == legacyBundleKey || key == encryptionKeyItem || !strings.HasPrefix(key, legacyTokenPrefix) {
@@ -250,9 +283,9 @@ func (s *KeyringTokenStore) migrateLegacyLocked() int {
 			continue
 		}
 		s.cache[strings.TrimPrefix(key, legacyTokenPrefix)] = &token
-		_ = s.ring.Remove(key)
+		legacyKeys = append(legacyKeys, key)
 	}
-	return len(s.cache)
+	return legacyKeys
 }
 
 // persistLocked encrypts the in-memory bundle and writes it atomically to
