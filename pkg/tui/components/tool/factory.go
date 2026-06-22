@@ -6,6 +6,8 @@
 package tool
 
 import (
+	"sync"
+
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 	handofftool "github.com/docker/docker-agent/pkg/tools/builtin/handoff"
@@ -32,12 +34,13 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-// builder constructs the layout.Model for a tool message.
-type builder func(msg *types.Message, sessionState service.SessionStateReader) layout.Model
+// Builder constructs the layout.Model for a tool message. Embedders implement
+// this to provide a custom view for a tool and register it via Register.
+type Builder = func(msg *types.Message, sessionState service.SessionStateReader) layout.Model
 
 // builders maps a tool name (or a "category:<name>" key) to its renderer.
 // Tools sharing the same visual representation point at the same builder.
-var builders = map[string]builder{
+var builders = map[string]Builder{
 	transfertasktool.ToolNameTransferTask: transfertask.New,
 	handofftool.ToolNameHandoff:           handoff.New,
 	filesystem.ToolNameEditFile:           editfile.New,
@@ -57,14 +60,49 @@ var builders = map[string]builder{
 	todo.ToolNameListTodos:                todotool.New,
 }
 
+// custom holds renderers registered by embedders via Register. They are
+// consulted before the built-in builders, so an embedder can override a
+// built-in tool's view as well as render tools cagent has no view for.
+var (
+	customMu sync.RWMutex
+	custom   = map[string]Builder{}
+)
+
+// Register installs a custom renderer for the given key, which is a tool name
+// (e.g. "add") or a "category:<name>" key (e.g. "category:compute"). Registering
+// a key that already exists replaces the previous renderer. Registered renderers
+// take precedence over the built-in ones.
+//
+// Register is safe for concurrent use, but is normally called once at startup
+// (e.g. via tui.WithToolRenderers) before the TUI begins rendering.
+func Register(key string, b Builder) {
+	customMu.Lock()
+	defer customMu.Unlock()
+	custom[key] = b
+}
+
+// resolve returns the renderer for key, preferring a registered custom renderer
+// over the built-in one.
+func resolve(key string) (Builder, bool) {
+	customMu.RLock()
+	b, ok := custom[key]
+	customMu.RUnlock()
+	if ok {
+		return b, true
+	}
+	b, ok = builders[key]
+	return b, ok
+}
+
 // New returns the appropriate tool view for the given message.
 // Lookup order: exact tool name, then "category:<category>", then default.
+// At each tier a registered custom renderer wins over the built-in one.
 func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	if b, ok := builders[msg.ToolCall.Function.Name]; ok {
+	if b, ok := resolve(msg.ToolCall.Function.Name); ok {
 		return b(msg, sessionState)
 	}
 	if cat := msg.ToolDefinition.Category; cat != "" {
-		if b, ok := builders["category:"+cat]; ok {
+		if b, ok := resolve("category:" + cat); ok {
 			return b(msg, sessionState)
 		}
 	}

@@ -31,6 +31,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
+	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/internal/editorname"
@@ -296,6 +297,22 @@ func WithTranscriber(t Transcriber) Option {
 	return func(m *appModel) {
 		if t != nil {
 			m.transcriber = t
+		}
+	}
+}
+
+// WithToolRenderers registers custom tool-call renderers, keyed by tool name
+// (e.g. "add") or a "category:<name>" key (e.g. "category:compute"). Registered
+// renderers take precedence over the built-in ones, letting an embedder customize
+// how specific tools are displayed — e.g. typesetting a calculator's result as
+// math instead of the generic view.
+//
+// See pkg/tui/components/tool for the Builder contract; a renderer is typically
+// a thin wrapper around toolcommon.NewBase.
+func WithToolRenderers(renderers map[string]tool.Builder) Option {
+	return func(*appModel) {
+		for key, b := range renderers {
+			tool.Register(key, b)
 		}
 	}
 }
