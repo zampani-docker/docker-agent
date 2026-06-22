@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -372,6 +373,88 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	}
 
 	return sess, sm.sessionStore.AddSession(ctx, sess)
+}
+
+// ErrForkInvalidMessage is returned when a fork is requested at a message
+// index that does not point at a user-role message (e.g. an assistant turn,
+// a tool response, or a sub-session item).
+var ErrForkInvalidMessage = errors.New("fork point must be a user message")
+
+// ForkSession creates a new session whose history is a deep copy of the
+// parent session up to (but excluding) the message at userMessageIndex, with
+// a fork-numbered title ("<parent> (fork N)"). The index refers to the flat,
+// user-visible message list returned by Session.GetAllMessages — the same
+// indexing that api.SessionResponse.Messages exposes to clients — so callers
+// do not need to know about the underlying Item slice.
+//
+// The message at userMessageIndex must be a user message; otherwise
+// ErrForkInvalidMessage is returned. The fork itself does not include that
+// message, so a client can prefill it into its chat input to let the user
+// edit and resubmit.
+func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, userMessageIndex int) (*session.Session, error) {
+	parent, err := sm.sessionStore.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	itemIndex, err := flatMessageIndexToItemIndex(parent, userMessageIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	if itemIndex < len(parent.Messages) {
+		item := parent.Messages[itemIndex]
+		if item.Message == nil || item.Message.Message.Role != chat.MessageRoleUser {
+			return nil, ErrForkInvalidMessage
+		}
+	}
+
+	forked, err := session.ForkSession(parent, itemIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := sm.sessionStore.AddSession(ctx, forked); err != nil {
+		return nil, err
+	}
+	return forked, nil
+}
+
+// flatMessageIndexToItemIndex maps an index in the flat user-visible message
+// list (Session.GetAllMessages — which skips system messages and flattens
+// sub-sessions) into an index in the parent's Session.Messages Item slice.
+// Returns an error if the index is out of range or lands inside a
+// sub-session, where positional forking would be ambiguous.
+func flatMessageIndexToItemIndex(s *session.Session, flatIdx int) (int, error) {
+	if flatIdx < 0 {
+		return 0, fmt.Errorf("message index %d out of range", flatIdx)
+	}
+	seen := 0
+	for i, item := range s.Messages {
+		switch {
+		case item.IsMessage():
+			// GetAllMessages filters out system messages; mirror that here
+			// so the flat index lines up with what the client sees.
+			if item.Message.Message.Role == chat.MessageRoleSystem {
+				continue
+			}
+			if seen == flatIdx {
+				return i, nil
+			}
+			seen++
+		case item.IsSubSession():
+			subCount := len(item.SubSession.GetAllMessages())
+			if flatIdx-seen < subCount {
+				return 0, fmt.Errorf("cannot fork at message index %d: position falls inside a sub-session", flatIdx)
+			}
+			seen += subCount
+		}
+	}
+	// Allow flatIdx == seen, meaning "after the last message" — a full clone.
+	if flatIdx == seen {
+		return len(s.Messages), nil
+	}
+	return 0, fmt.Errorf("message index %d out of range", flatIdx)
 }
 
 // GetSessions retrieves all sessions.

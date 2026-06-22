@@ -13,6 +13,18 @@ import (
 // BranchSession creates a new session branched from the parent at the given position.
 // Messages up to (but not including) branchAtPosition are deep-cloned into the new session.
 func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
+	return branchSessionWithTitle(parent, branchAtPosition, generateBranchTitle)
+}
+
+// ForkSession is like BranchSession but uses fork-numbered titles
+// ("<title> (fork 1)", "(fork 2)", …). It is intended for HTTP/API clients
+// that expose a "fork from here" UX distinct from the TUI's branch-from-edit
+// flow, which keeps using BranchSession.
+func ForkSession(parent *Session, branchAtPosition int) (*Session, error) {
+	return branchSessionWithTitle(parent, branchAtPosition, generateForkTitle)
+}
+
+func branchSessionWithTitle(parent *Session, branchAtPosition int, titleFn func(string) string) (*Session, error) {
 	if parent == nil {
 		return nil, errors.New("parent session is nil")
 	}
@@ -21,7 +33,7 @@ func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
 	}
 
 	branched := New()
-	copySessionMetadata(branched, parent, generateBranchTitle(parent.Title))
+	copySessionMetadata(branched, parent, titleFn(parent.Title))
 
 	branched.Messages = make([]Item, 0, branchAtPosition)
 	for i := range branchAtPosition {
@@ -189,6 +201,27 @@ func generateBranchTitle(parentTitle string) string {
 	}
 
 	return parentTitle + " (branched)"
+}
+
+// generateForkTitle creates a title for a forked session based on the parent
+// title using "(fork N)" suffixes that increment on repeated forks.
+// If the parent has no title, returns empty string (will trigger auto-generation).
+// "<title>" -> "<title> (fork 1)"; "<title> (fork N)" -> "<title> (fork N+1)".
+func generateForkTitle(parentTitle string) string {
+	if parentTitle == "" {
+		return ""
+	}
+
+	if idx := strings.LastIndex(parentTitle, "(fork "); idx >= 0 {
+		suffix := parentTitle[idx:]
+		var n int
+		if _, err := fmt.Sscanf(suffix, "(fork %d)", &n); err == nil && n >= 1 {
+			baseTitle := strings.TrimRight(parentTitle[:idx], " \t")
+			return fmt.Sprintf("%s (fork %d)", baseTitle, n+1)
+		}
+	}
+
+	return parentTitle + " (fork 1)"
 }
 
 func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {
