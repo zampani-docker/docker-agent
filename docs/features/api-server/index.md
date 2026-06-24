@@ -50,6 +50,7 @@ All endpoints are under the `/api` prefix.
 | `DELETE` | `/api/sessions/:id`                 | Delete a session                                        |
 | `PATCH`  | `/api/sessions/:id/title`           | Update session title                                    |
 | `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                              |
+| `POST`   | `/api/sessions/:id/fork`            | Fork a session at a user message — creates a new session with messages `[0, message_index)` of the parent (see [Session Forking](#session-forking)) |
 | `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)       |
 | `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                         |
 | `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request              |
@@ -292,6 +293,35 @@ restarted) rebuild a session's state and keep it correct without polling.
 runtime is attached and ready to accept follow-ups, then return its status, or
 `503` on timeout. This is session-scoped, unlike `GET /api/ready`, which fires
 as soon as any session is ready.
+
+## Session Forking
+
+`POST /api/sessions/:id/fork` creates a new session whose history is a copy of the parent up to (but **excluding**) a specified user message. This lets a client "branch" a conversation — e.g. rewind to an earlier question and try a different prompt — without losing the shared history that came before.
+
+**Request body:**
+
+```json
+{ "message_index": 2 }
+```
+
+`message_index` is a **0-based index** into the flat, user-visible message list (the same shape `GET /api/sessions/:id` returns in `messages`). The fork includes messages `[0, message_index)` — the message at `message_index` is **excluded**, so clients can prefill it into their chat input for the user to edit and resubmit.
+
+**Example:**
+
+```bash
+# Fork a session before message index 4 (the user message the user wants to rewrite)
+$ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
+  -H 'Content-Type: application/json' \
+  -d '{"message_index": 4}'
+# Returns: api.SessionResponse for the new forked session
+# New session title: "<parent title> (fork 1)", "(fork 2)", etc.
+```
+
+**Validation:**
+
+- `message_index` must point to a **user-role message**; pointing at an assistant turn returns `400 Bad Request`.
+- Out-of-range indices return `400 Bad Request`.
+- An index that falls inside a sub-session returns `400 Bad Request`.
 
 ## Idempotent follow-ups
 
