@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/remote"
 	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
@@ -202,27 +205,20 @@ func (f *modelsListFlags) collectModels(ctx context.Context, availableProviders 
 		}
 	}
 
-	// For catalog providers not found in models.dev, try fetching models
-	// directly from the provider's own API (e.g. opencode-zen).
-	for _, name := range provider.CatalogProviders() {
-		if name == "dmr" {
-			continue
-		}
-		if _, exists := db.Providers[name]; exists {
-			continue
-		}
-		if !f.all && !availableProviders[name] {
-			continue
-		}
-
-		models := fetchProviderModels(ctx, name)
-		for _, m := range models {
-			ref := name + "/" + m
-			if seen[ref] {
-				continue
+	// When the user explicitly filters by provider (--provider), try fetching
+	// models directly from that provider's own API if models.dev lacks it.
+	if f.providerFilter != "" && db != nil {
+		if _, exists := db.Providers[f.providerFilter]; !exists {
+			if provider.IsCatalogProvider(f.providerFilter) {
+				for _, m := range fetchProviderModels(ctx, f.providerFilter) {
+					ref := f.providerFilter + "/" + m
+					if seen[ref] {
+						continue
+					}
+					seen[ref] = true
+					rows = append(rows, modelRow{Provider: f.providerFilter, Model: m})
+				}
 			}
-			seen[ref] = true
-			rows = append(rows, modelRow{Provider: name, Model: m})
 		}
 	}
 
@@ -245,33 +241,52 @@ func fetchProviderModels(ctx context.Context, providerName string) []string {
 	}
 
 	modelsURL := strings.TrimRight(alias.BaseURL, "/") + "/models"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, http.NoBody)
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: remote.NewTransport(ctx),
+	}
+	return fetchModelsFromURL(ctx, modelsURL, client)
+}
+
+// fetchModelsFromURL fetches and parses an OpenAI-compatible models list
+// from the given URL. The client parameter allows tests to inject an
+// httptest server's client.
+func fetchModelsFromURL(ctx context.Context, url string, client *http.Client) []string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
+		slog.WarnContext(ctx, "failed to create request for provider models", "url", url, "error", err)
 		return nil
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
+		slog.WarnContext(ctx, "failed to fetch provider models", "url", url, "error", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		slog.WarnContext(ctx, "provider models endpoint returned non-200", "url", url, "status", resp.StatusCode)
 		return nil
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		slog.WarnContext(ctx, "failed to read provider models response", "url", url, "error", err)
 		return nil
 	}
 
 	var result openAIModelsResponse
 	if err := json.Unmarshal(body, &result); err != nil {
+		slog.WarnContext(ctx, "failed to parse provider models response", "url", url, "error", err)
 		return nil
 	}
 
 	models := make([]string, 0, len(result.Data))
 	for _, m := range result.Data {
+		if m.ID == "" {
+			continue
+		}
 		models = append(models, m.ID)
 	}
 	return models
