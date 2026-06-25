@@ -33,6 +33,16 @@ func (t *Config) Validate() error {
 		}
 	}
 
+	// Validate reusable, named toolset definitions even when no agent
+	// references them (parity with the top-level MCP/skill definition
+	// validation).
+	for name := range t.Toolsets {
+		ts := t.Toolsets[name]
+		if err := ts.validate(); err != nil {
+			return fmt.Errorf("toolsets.%s: %w", name, err)
+		}
+	}
+
 	for i := range t.Agents {
 		agent := &t.Agents[i]
 
