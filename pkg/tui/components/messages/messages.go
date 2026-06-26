@@ -352,6 +352,10 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) 
 			cmd := m.copyMessageToClipboard(msgIdx)
 			return m, cmd
 		}
+
+		if m.isRetryLabelClick(msgIdx, localLine, col) {
+			return m, core.CmdHandler(messages.RetryMsg{})
+		}
 	}
 
 	if url := m.urlAt(line, col); url != "" {
@@ -1910,6 +1914,34 @@ func (m *model) isCopyLabelClick(msgIdx, localLine, col int) bool {
 
 	labelStart := ansi.StringWidth(before)
 	labelEnd := labelStart + ansi.StringWidth(types.AssistantMessageCopyLabel)
+	return col >= labelStart && col < labelEnd
+}
+
+// isRetryLabelClick checks if the click is on the retry label of an error message.
+func (m *model) isRetryLabelClick(msgIdx, localLine, col int) bool {
+	if msgIdx < 0 || msgIdx >= len(m.messages) {
+		return false
+	}
+	if m.messages[msgIdx].Type != types.MessageTypeError {
+		return false
+	}
+	if msgIdx >= len(m.views) {
+		return false
+	}
+
+	item := m.renderItem(msgIdx, m.views[msgIdx])
+	if localLine < 0 || localLine >= len(item.lines) {
+		return false
+	}
+
+	plainLine := ansi.Strip(item.lines[localLine])
+	before, _, ok := strings.Cut(plainLine, types.ErrorRetryLabel)
+	if !ok {
+		return false
+	}
+
+	labelStart := ansi.StringWidth(before)
+	labelEnd := labelStart + ansi.StringWidth(types.ErrorRetryLabel)
 	return col >= labelStart && col < labelEnd
 }
 

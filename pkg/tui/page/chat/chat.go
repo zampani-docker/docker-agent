@@ -385,6 +385,9 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		slog.Debug(msg.Content)
 		return p.handleSendMsg(msg)
 
+	case msgtypes.RetryMsg:
+		return p.handleRetry()
+
 	case msgtypes.ToggleHideToolResultsMsg:
 		// Forward to messages component to invalidate cache and trigger redraw
 		model, cmd := p.messages.Update(messages.ToggleHideToolResultsMsg{})
@@ -935,6 +938,35 @@ func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
 	}()
 
 	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, loadingCmd)
+}
+
+// handleRetry re-runs the agent turn after an error, resuming the conversation
+// from the current session state without adding a new user message.
+func (p *chatPage) handleRetry() (layout.Model, tea.Cmd) {
+	if p.app == nil || p.app.IsReadOnly() {
+		return p, notification.WarningCmd("Session is read-only. No new messages can be sent.")
+	}
+
+	// Ignore retry requests while a turn is already in flight.
+	if p.working {
+		return p, nil
+	}
+
+	if p.msgCancel != nil {
+		p.msgCancel()
+	}
+
+	p.streamDepth = 0
+	p.agentStack = nil
+	p.sidebar.ResetStreamTracking()
+
+	var ctx context.Context
+	ctx, p.msgCancel = context.WithCancel(context.Background())
+
+	spinnerCmd := p.setWorking(true)
+	p.app.Retry(ctx, p.msgCancel)
+
+	return p, tea.Batch(p.messages.ScrollToBottom(), spinnerCmd)
 }
 
 // CompactSession generates a summary and compacts the session history
