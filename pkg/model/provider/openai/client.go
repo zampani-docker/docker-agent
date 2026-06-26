@@ -1165,7 +1165,7 @@ func isCustomProvider(cfg *latest.ModelConfig) bool {
 // convention rather than a hardcoded allow-list.
 func autoSelectsResponsesAPI(provider string) bool {
 	switch provider {
-	case "openai", "github-copilot", "opencode-go", "opencode-zen":
+	case "openai", "github-copilot", "opencode-zen":
 		return true
 	}
 	return false

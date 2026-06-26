@@ -44,6 +44,8 @@ var cloudProviders = []providerConfig{
 		"AWS_PROFILE",
 		"AWS_ROLE_ARN",
 	}, "AWS_ACCESS_KEY_ID (or AWS_PROFILE, AWS_ROLE_ARN, AWS_BEARER_TOKEN_BEDROCK)"},
+	{"opencode-zen", []string{"OPENCODE_API_KEY"}, "OPENCODE_API_KEY"},
+	{"opencode-go", []string{"OPENCODE_API_KEY"}, "OPENCODE_API_KEY"},
 }
 
 // AutoModelFallbackError is returned when auto model selection fails because
