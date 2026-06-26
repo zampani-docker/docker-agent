@@ -51,6 +51,8 @@
       url: /tools/shell/
     - title: Think
       url: /tools/think/
+    - title: Plan
+      url: /tools/plan/
     - title: Todo
       url: /tools/todo/
     - title: Memory
@@ -161,3 +163,5 @@
       url: /community/troubleshooting/
     - title: Telemetry
       url: /community/telemetry/
+    - title: OpenTelemetry Tracing
+      url: /community/opentelemetry/

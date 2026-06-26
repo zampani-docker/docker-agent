@@ -33,6 +33,8 @@ agents:
     max_consecutive_tool_calls: int # Optional: max identical consecutive tool calls
     max_old_tool_call_tokens: int # Optional: token budget for old tool call content (disabled unless positive)
     num_history_items: int # Optional: limit conversation history
+    use_toolsets: [list] # Optional: names of top-level toolsets to merge into this agent
+    readonly: boolean # Optional: restrict all toolsets to read-only tools only
     skills: boolean | [list] # Optional: enable skill discovery (true/false or list of names and/or sources)
     use_commands: [list] # Optional: names of top-level commands groups to merge into this agent
     use_skills: [list] # Optional: names of top-level skills groups to merge into this agent
@@ -97,6 +99,8 @@ agents:
 | `commands`                  | object  | ✗        | Named prompts that can be run with `docker agent run config.yaml /command_name`. Can be simple strings or objects with `instruction` and/or `agent` fields for agent switching. See [Named Commands](#named-commands) below. |
 | `use_commands`              | list of string | ✗   | Names of top-level `commands` groups to merge into this agent. Inline `commands` entries take precedence on name conflicts. Default: `[]`. |
 | `use_skills`                | list of string | ✗   | Names of top-level `skills` groups to merge into this agent. Inline skills are deduplicated by name against merged entries. Default: `[]`. |
+| `use_toolsets`              | list of string | ✗   | Names of top-level `toolsets` groups to merge into this agent. See [Reusable Toolsets]({{ '/configuration/overview/#reusable-toolsets-toolsets' | relative_url }}). Default: `[]`. |
+| `readonly`                  | boolean | ✗   | When `true`, every toolset on this agent is filtered to expose only read-only tools (those annotated with a read-only hint). Mutating tools are removed at load time and cannot be called even if the model tries. See [Read-Only Agents](#read-only-agents) below. |
 | `welcome_message`           | string  | ✗        | Message displayed to the user when a session starts. Rendered as Markdown in the TUI. **Not sent to the model** — it exists purely for the user's benefit. Useful for telling users what the agent can do and what commands are available. |
 | `handoffs`                  | array   | ✗        | List of agent names this agent can hand off the conversation to. Enables the `handoff` tool. See [Handoffs Routing]({{ '/concepts/multi-agent/#handoffs-routing' | relative_url }}).                  |
 | `force_handoff`             | string  | ✗        | Name of an agent that unconditionally receives the conversation whenever this agent produces a final response. The runtime performs the switch itself, bypassing the LLM's tool-calling, guaranteeing deterministic pipelines. Must not reference the agent itself, and chains must not form a cycle. See [Forced Handoffs]({{ '/concepts/multi-agent/#forced-handoffs' | relative_url }}). |
@@ -369,6 +373,44 @@ Commands use JavaScript template literal syntax (`${env.VAR}`) for environment v
 The same syntax is also expanded in agent and toolset instructions: `agents.<name>.instruction` and `toolsets[*].instruction` support `${env.X}` placeholders (with optional `||` defaults and ternary expressions). `agents.<name>.description` and `agents.<name>.welcome_message` also support it.
 
 Note that path-like fields (`working_dir`, `path`) primarily use a shell-style syntax (`$VAR`, `${VAR}`, `~`), and also accept `${env.X}` as an alias (though not richer JS expressions). See [Variable Expansion in Config Fields]({{ '/configuration/overview/#variable-expansion-in-config-fields' | relative_url }}) for the full table.
+
+## Read-Only Agents
+
+Set `readonly: true` on an agent to restrict all of its toolsets to tools that are annotated as read-only. Mutating tools are filtered out at load time — the agent cannot list or call them, even if the model hallucinates a call.
+
+You can also set `readonly: true` on an individual toolset to restrict only that toolset while leaving others unrestricted.
+
+```yaml
+agents:
+  # Agent-level readonly: every toolset is restricted to read-only tools.
+  inspector:
+    model: anthropic/claude-sonnet-4-5
+    description: Read-only inspector that can explore but never modify.
+    instruction: Explore the project. Do not make changes.
+    readonly: true
+    toolsets:
+      - type: filesystem
+      - type: shell
+
+  # Toolset-level readonly: only the filesystem toolset is restricted;
+  # the shell toolset keeps all of its tools.
+  mixed:
+    model: anthropic/claude-sonnet-4-5
+    description: Read-only file access, full shell access.
+    instruction: You can read files and run any shell command.
+    toolsets:
+      - type: filesystem
+        readonly: true
+      - type: shell
+```
+
+See [`examples/readonly.yaml`](https://github.com/docker/docker-agent/blob/main/examples/readonly.yaml) for a complete example.
+
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">Which tools are read-only?
+</div>
+  <p>Whether a tool is read-only is determined by its <code>ReadOnlyHint</code> annotation. For built-in tools, read-only operations (list/read/search) carry the hint; mutating operations (write/delete/execute) do not. Custom and MCP tools expose the hint via their own annotations.</p>
+</div>
 
 ## Complete Example
 

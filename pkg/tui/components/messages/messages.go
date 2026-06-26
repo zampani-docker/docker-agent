@@ -38,6 +38,15 @@ import (
 // ToggleHideToolResultsMsg triggers hiding/showing tool results
 type ToggleHideToolResultsMsg struct{}
 
+// scrollToBottomMsg requests the message list scroll to the bottom. It is
+// returned by commands (e.g. after appending a message) instead of mutating
+// scroll state directly from the command goroutine: bubbletea runs command
+// closures on their own goroutines, so writing scrollOffset / userHasScrolled
+// / bottomSlack there races with View() / updateScrollState() on the event
+// loop. Handling it as a message keeps all scroll-state mutation on the
+// single Update/View goroutine.
+type scrollToBottomMsg struct{}
+
 type toggleableView interface {
 	IsToggleLine(lineIdx int) bool
 	Toggle()
@@ -55,7 +64,7 @@ type Model interface {
 	AddLoadingMessage(description string) tea.Cmd
 	ReplaceLoadingWithUser(content string, sessionPos int) tea.Cmd
 	AddErrorMessage(content string) tea.Cmd
-	AddAssistantMessage() tea.Cmd
+	AddAssistantMessage(sender, label string) tea.Cmd
 	AddCancelledMessage() tea.Cmd
 	AddWelcomeMessage(content string) tea.Cmd
 	AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status types.ToolStatus) tea.Cmd
@@ -232,6 +241,12 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case DebouncedCopyMsg:
 		cmd := m.handleDebouncedCopy(msg)
 		return m, cmd
+
+	case scrollToBottomMsg:
+		if !m.userHasScrolled {
+			m.scrollToBottom()
+		}
+		return m, nil
 
 	case editfile.ToggleDiffViewMsg:
 		m.invalidateAllItems()
@@ -471,11 +486,14 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		switch msg.Key().Code {
-		case tea.KeyEnter:
-			// Plain Enter commits the edit
+		// The configured send key commits the edit (Enter by default), mirroring
+		// the composer so a remapped editor_send works here too.
+		if key.Matches(msg, core.GetKeys().EditorSend) {
 			cmd := m.commitInlineEdit()
 			return m, cmd
+		}
+
+		switch msg.Key().Code {
 		case tea.KeyEscape:
 			// Esc cancels the edit
 			cmd := m.CancelInlineEdit()
@@ -1237,8 +1255,12 @@ func (m *model) AddShellOutputMessage(content string) tea.Cmd {
 	return m.addMessage(types.ShellOutput(content))
 }
 
-func (m *model) AddAssistantMessage() tea.Cmd {
-	return m.addMessage(types.Spinner())
+func (m *model) AddAssistantMessage(sender, label string) tea.Cmd {
+	m.removeSpinner()
+	if label == "" {
+		return m.addMessage(types.Spinner())
+	}
+	return m.addMessage(types.SpinnerLabeled(sender, label))
 }
 
 func (m *model) AddCancelledMessage() tea.Cmd {
@@ -1280,8 +1302,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	}
 	if shouldAutoScroll {
 		cmds = append(cmds, func() tea.Msg {
-			m.scrollToBottom()
-			return nil
+			return scrollToBottomMsg{}
 		})
 	}
 
@@ -1642,8 +1663,7 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	}
 	if shouldAutoScroll {
 		cmds = append(cmds, func() tea.Msg {
-			m.scrollToBottom()
-			return nil
+			return scrollToBottomMsg{}
 		})
 	}
 
@@ -1671,10 +1691,7 @@ func (m *model) getActiveReasoningBlock(agentName string) (*reasoningblock.Model
 
 func (m *model) ScrollToBottom() tea.Cmd {
 	return func() tea.Msg {
-		if !m.userHasScrolled {
-			m.scrollToBottom()
-		}
-		return nil
+		return scrollToBottomMsg{}
 	}
 }
 
@@ -2030,9 +2047,14 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	}
 	ta.SetStyles(inlineEditStyle)
 
-	// Configure newline keybinding - use ctrl+j as the safe default
-	// (shift+enter only works on terminals with keyboard enhancements)
-	ta.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
+	// Mirror the composer's configurable newline keys (ctrl+j by default),
+	// always offering shift+enter for terminals with keyboard enhancements.
+	// Clone so the keymap never aliases the cached KeyMap slice.
+	newlineKeys := slices.Clone(core.GetKeys().EditorNewline.Keys())
+	if !slices.Contains(newlineKeys, "shift+enter") {
+		newlineKeys = append([]string{"shift+enter"}, newlineKeys...)
+	}
+	ta.KeyMap.InsertNewline.SetKeys(newlineKeys...)
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 
 	m.inlineEditTextarea = ta

@@ -94,9 +94,52 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 
 Slash commands (both built-in and named) execute immediately when entered. Regular chat messages are queued and processed in order. This means you can invoke a slash command to interrupt or direct the agent even while it is mid-response.
 
+### Agents Panel
+
+The sidebar's **Agents** section lists every agent in the team. The current agent is shown as a focus **card** (rendered in place at its position in the list) with its name, a wrapped description, its full `provider/model`, and a thinking line. Every other agent is shown as a compact **two-line row** — line 1 is the shortcut/spinner, the agent name (in its accent color), and a right-aligned thinking **gauge**; line 2 is the indented full `provider/model` — so a large team stays scannable while still showing each model. Agents are separated by a blank line so the two-line rows stay visually distinct. The effort **gauge** is the only visual language for thinking; the focus card and the Agent Inspector spell out the exact level alongside it. Left-click any agent to switch to it.
+
+#### Agent inspector
+
+Open a read-only **Agent Inspector** to inspect any agent's full configuration combined with its live state. The instruction/system prompt is deliberately omitted; everything else the agent declares is shown:
+
+- **Right-click any agent** (card or row) to open the inspector without switching to it.
+- **<kbd>Ctrl</kbd>+left-click any agent** does the same — a fallback for terminals that don't forward right-clicks.
+- **Left-click** always switches to the agent.
+
+The title is rendered in the agent's accent color. Sections appear in this order, and any empty section is omitted:
+
+- **Description** — the agent's wrapped description.
+- **Live state** — a `● current agent` line when the inspected agent is the one currently running.
+- **Model / Fallback / Thinking** — the `provider/model`, any fallback models, and the gauge + value thinking line (omitted for models with no selectable thinking, e.g. harness-backed agents).
+- **Sub-agents (N) / Handoffs (N) / Skills (N)** — compact, inline, comma-separated lists wrapped to the dialog width.
+- **Limits** — the configured per-agent limits that are set, e.g. `Limits: max-iter 50 · history 40 · max-tool-calls 5`.
+- **Options** — the enabled option flags, e.g. `Options: add-date · add-environment-info · redact-secrets`.
+- **Toolsets (N)** — one line per toolset with a status marker, its name, kind, and tool count, followed by the indented tool names.
+- **Commands (N)** — the slash commands the agent defines, each with its description.
+
+Each toolset carries a single-width status marker reflecting its **live** lifecycle: `●` started (serving), `○` stopped (not yet started), or `⚠` error. The tools listed under a toolset are the **live** tool names when it has started; for a toolset that has not started, the inspector instead shows its declared `tools:` allow-list prefixed with `declared:` (and shows nothing when the toolset declares no allow-list and therefore serves every tool). This lets you see both what an agent is configured with and what is actually running, even before the agent has been used.
+
+The dialog scrolls when the content is long; press <kbd>Esc</kbd> to close it. Remote runtimes (which hold no local team config) degrade gracefully — the config-derived sections are simply omitted.
+
+Model identifiers on line 2 are truncated **from the left** (e.g. `…claude-sonnet-4-6`) only when they overflow, so the informative tail (variant/version) is preserved. As the sidebar narrows the model keeps its own line, and near the minimum width line 1's gauge collapses to a single cell to keep the name readable.
+
+The thinking state of each model is shown with a gauge + value on the card and a gauge or badge on the row (no `✻` glyph):
+
+| Model state            | Card line                      | Row badge              |
+| ---------------------- | ------------------------------ | ---------------------- |
+| Effort level           | `thinking ▰▰▰▰▱▱ high`         | `▰▰▰▰▱▱` (effort gauge)  |
+| Adaptive budget        | `thinking auto adaptive`       | `auto`                 |
+| Token budget           | `thinking ◉ 8.2K tokens`        | `◉ 8.2K`               |
+| Disabled (capable)     | `thinking ▱▱▱▱▱▱ off` (dimmed)  | `▱▱▱▱▱▱` (empty gauge)  |
+| Not reasoning-capable  | _(omitted)_                    | _(omitted)_            |
+
+The **effort gauge** is a fixed-width six-cell indicator (`▰` filled, `▱` empty) so the badge column stays aligned. It maps the six selectable levels one-to-one onto filled-cell counts — `minimal` → `▰▱▱▱▱▱`, `low` → `▰▰▱▱▱▱`, `medium` → `▰▰▰▱▱▱`, `high` → `▰▰▰▰▱▱`, `xhigh` → `▰▰▰▰▰▱`, `max` → `▰▰▰▰▰▰` — so the cell count alone is lossless, with a low→high color ramp as a secondary cue. A capable-but-disabled model shows a dim empty gauge (`▱▱▱▱▱▱` `off`), adaptive budgets show `auto`, and token budgets keep `◉ <count>`. The same gauge + value renders on the focus card, the Agent Inspector, and the row.
+
+Harness-backed agents (e.g. `claude-code`) show the harness type as their model and no thinking gauge. Press **Shift+Tab** to cycle the current model's thinking-effort level; a `✻ Thinking: <level>` toast confirms the change (useful when the sidebar is hidden).
+
 ### Thinking and Tool Details
 
-Reasoning/thinking blocks are collapsed by default. When collapsed, the TUI shows a short preview and compact tool summaries. Expand a block to see the full thinking content and the real tool renderers, including detailed tool output such as file edit diffs.
+Reasoning/thinking blocks are collapsed by default and carry a `Thinking` header badge. When collapsed, the TUI shows a short preview and compact tool summaries. Expand a block to see the full thinking content and the real tool renderers, including detailed tool output such as file edit diffs.
 
 To start new sessions with thinking/tool blocks expanded by default, set `expand_thinking` in your user config:
 
@@ -205,7 +248,7 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Ctrl+R     | Reverse history search (search previous inputs) |
 | Ctrl+G     | Cancel reverse history search                   |
 | Ctrl+S     | Cycle to next agent in the team                 |
-| Shift+Tab  | Cycle the current model's thinking-effort level |
+| Shift+Tab  | Cycle the current model's thinking-effort level (shows a `✻ Thinking: <level>` toast) |
 | Ctrl+1 – 9 | Switch directly to agent _N_ in the team list   |
 | Ctrl+T     | Open a new tab (additional agent session)       |
 | Ctrl+W     | Close the current tab                           |
@@ -221,6 +264,50 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Up/Down    | Navigate message history                        |
 
 Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to view the complete list of all available keyboard shortcuts.
+
+### Custom Keybindings
+
+You can remap the shortcuts above by adding a `keybindings` list to the `settings` block of your `~/.config/cagent/config.yaml`. Each entry maps an action to one or more key combinations in [Bubbles key format](https://github.com/charmbracelet/bubbles) (for example `ctrl+q`, `alt+enter`, `f2`). Unlisted actions keep their defaults.
+
+This is the recommended way to replace the `Ctrl+J` newline fallback, which conflicts with common editor/terminal shortcuts (for example inside VS Code).
+
+```yaml
+settings:
+  keybindings:
+    # Insert a newline with Alt+Enter instead of Ctrl+J. Shift+Enter still
+    # works automatically on terminals that report it.
+    - action: "editor_newline"
+      keys: ["alt+enter"]
+    # Allow several keys for one action.
+    - action: "commands"
+      keys: ["f2", "ctrl+k"]
+    - action: "quit"
+      keys: ["ctrl+q"]
+```
+
+**Valid actions:**
+
+| Action                     | Default      | Description                            |
+| -------------------------- | ------------ | -------------------------------------- |
+| `editor_send`              | `enter`      | Send the current message               |
+| `editor_newline`           | `ctrl+j`     | Insert a newline in the input          |
+| `quit`                     | `ctrl+c`     | Quit (opens the exit confirmation)     |
+| `switch_focus`             | `tab`        | Switch focus between panels            |
+| `commands`                 | `ctrl+k`     | Open the command palette               |
+| `help`                     | `ctrl+h`     | Show the help dialog                   |
+| `toggle_yolo`              | `ctrl+y`     | Toggle YOLO mode                       |
+| `toggle_hide_tool_results` | `ctrl+o`     | Toggle hiding tool results             |
+| `cycle_agent`              | `ctrl+s`     | Cycle to the next agent                |
+| `model_picker`             | `ctrl+m`     | Open the model picker                  |
+| `clear_queue`              | `ctrl+x`     | Clear queued messages                  |
+| `suspend`                  | `ctrl+z`     | Suspend the TUI                        |
+| `toggle_sidebar`           | `ctrl+b`     | Toggle the sidebar                     |
+| `edit_external`            | `ctrl+g`     | Edit input in an external editor       |
+| `history_search`           | `ctrl+r`     | Incremental history search             |
+
+`Shift+Enter` for newline is detected from your terminal's capabilities and is always available where supported, independent of `editor_newline`.
+
+Invalid entries are ignored with a warning (visible with `--debug`) so a bad config never breaks the TUI: unknown actions, empty or malformed keys, and keys that would collide with another action are dropped while every other binding keeps working.
 
 ## History Search
 
