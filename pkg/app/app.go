@@ -615,6 +615,34 @@ func (a *App) processInlineAttachment(att messages.Attachment, textBuilder *stri
 	fmt.Fprintf(textBuilder, "<attached_file path=%q>\n%s\n</attached_file>", att.Name, att.Content)
 }
 
+// Retry re-runs the agent loop on the current session without adding a new
+// user message. It is used to resume the conversation after an error: the
+// session already holds the messages exchanged so far, so RunStream picks up
+// from where it left off.
+func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
+	a.cancel = cancel
+
+	go func() { //nolint:gosec // background processing intentionally continues after request ctx ends; uses context.Background() only to forward StreamStoppedEvent
+		for event := range a.runtime.RunStream(ctx, a.session) {
+			// If context is cancelled, continue draining but don't forward events
+			// — except StreamStoppedEvent, which must always propagate so the
+			// supervisor can mark the session as no longer running.
+			if ctx.Err() != nil {
+				if _, ok := event.(*runtime.StreamStoppedEvent); ok {
+					a.sendEvent(context.Background(), event)
+				}
+				continue
+			}
+
+			if _, ok := event.(*runtime.SessionTitleEvent); ok {
+				a.titleGenerating.Store(false)
+			}
+
+			a.sendEvent(ctx, event)
+		}
+	}()
+}
+
 // RunWithMessage runs the agent loop with a pre-constructed message.
 // This is used for special cases like image attachments.
 func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message) {
