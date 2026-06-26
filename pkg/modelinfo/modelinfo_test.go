@@ -173,7 +173,8 @@ func TestDefaultClaudeContextLimit(t *testing.T) {
 		{"claude-fable-5", 1_000_000},
 		{"claude-fable-5-20260609", 1_000_000},
 		{"claude-fable", 1_000_000},
-		{"CLAUDE-FABLE-5", 1_000_000}, // case-insensitive
+		{"CLAUDE-FABLE-5", 1_000_000},                                // case-insensitive
+		{"global.anthropic.claude-fable-5-20260609-v1:0", 1_000_000}, // Bedrock Fable inference profile
 		{"claude-opus-4-6", 1_000_000},
 		{"claude-opus-4-7", 1_000_000},
 		{"claude-opus-4-8", 1_000_000},
