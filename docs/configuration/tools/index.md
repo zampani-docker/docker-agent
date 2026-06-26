@@ -18,6 +18,7 @@ Built-in tools are included with docker-agent and require no external dependenci
 | `shell` | Execute shell commands (sync + background jobs) | [Shell]({{ '/tools/shell/' | relative_url }}) |
 | `think` | Reasoning scratchpad | [Think]({{ '/tools/think/' | relative_url }}) |
 | `todo` | Task list management | [Todo]({{ '/tools/todo/' | relative_url }}) |
+| `plan` | Shared persistent scratchpad for multi-agent collaboration | [Plan]({{ '/tools/plan/' | relative_url }}) |
 | `tasks` | Persistent task database shared across sessions | [Tasks]({{ '/tools/tasks/' | relative_url }}) |
 | `memory` | Persistent key-value storage (SQLite) | [Memory]({{ '/tools/memory/' | relative_url }}) |
 | `fetch` | HTTP `GET` requests with text/markdown/html output | [Fetch]({{ '/tools/fetch/' | relative_url }}) |
