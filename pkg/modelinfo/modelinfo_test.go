@@ -163,39 +163,6 @@ func TestRejectsTokenThinking(t *testing.T) {
 	}
 }
 
-func TestDefaultClaudeContextLimit(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		model string
-		want  int64
-	}{
-		{"claude-fable-5", 1_000_000},
-		{"claude-fable-5-20260609", 1_000_000},
-		{"claude-fable", 1_000_000},
-		{"CLAUDE-FABLE-5", 1_000_000},                                // case-insensitive
-		{"global.anthropic.claude-fable-5-20260609-v1:0", 1_000_000}, // Bedrock Fable inference profile
-		{"claude-opus-4-6", 1_000_000},
-		{"claude-opus-4-7", 1_000_000},
-		{"claude-opus-4-8", 1_000_000},
-		{"claude-opus-4-8-20260601", 1_000_000},
-		{"anthropic.claude-opus-4-8-20260601-v1:0", 1_000_000},        // Bedrock ID
-		{"global.anthropic.claude-opus-4-8-20260601-v1:0", 1_000_000}, // Bedrock inference profile
-		{"CLAUDE-OPUS-4-8", 1_000_000},                                // case-insensitive
-		{"claude-opus-4-5", 200_000},                                  // older Opus uses the 200k floor
-		{"claude-opus-4-80", 200_000},                                 // must not match
-		{"claude-sonnet-4-6", 200_000},
-		{"claude-fables", 200_000}, // must not match
-		{"", 200_000},
-	}
-	for _, tc := range cases {
-		t.Run(tc.model, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, DefaultClaudeContextLimit(tc.model))
-		})
-	}
-}
-
 func TestUsesThinkingLevel(t *testing.T) {
 	t.Parallel()
 

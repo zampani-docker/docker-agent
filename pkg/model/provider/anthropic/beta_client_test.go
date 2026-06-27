@@ -183,13 +183,16 @@ func TestClampMaxTokens_ExactlyAtLimit(t *testing.T) {
 }
 
 // TestContextLimit_FromModelsDev verifies the client prefers the models.dev
-// context window and falls back to the Claude 200k default otherwise.
+// context window and falls back to the conservative Claude 200k floor when the
+// catalogue has no entry. Model-specific large windows (Fable, Opus 4.6+) come
+// from the catalogue/snapshot, not from hard-coded name patterns.
 func TestContextLimit_FromModelsDev(t *testing.T) {
 	store := modelsdev.NewDatabaseStore(&modelsdev.Database{
 		Providers: map[string]modelsdev.Provider{
 			"anthropic": {
 				Models: map[string]modelsdev.Model{
 					"claude-sonnet-4-5": {Limit: modelsdev.Limit{Context: 1000000}},
+					"claude-fable-5":    {Limit: modelsdev.Limit{Context: 1000000}},
 				},
 			},
 		},
@@ -201,21 +204,21 @@ func TestContextLimit_FromModelsDev(t *testing.T) {
 	}}
 	assert.Equal(t, int64(1000000), withStore.contextLimit(t.Context()))
 
-	// Unknown model falls back to the default Claude window.
+	// Unknown model falls back to the conservative Claude window.
 	unknown := &Client{Config: base.Config{
 		ModelConfig:  latest.ModelConfig{Provider: "anthropic", Model: "claude-future"},
 		ModelOptions: optionsFromStore(store),
 	}}
 	assert.Equal(t, int64(modelinfo.DefaultAnthropicContextLimit), unknown.contextLimit(t.Context()))
 
-	// Unknown Fable model: falls back to the family's 1M window.
+	// Fable model: its 1M window is sourced from the catalogue, not a name pattern.
 	fable := &Client{Config: base.Config{
 		ModelConfig:  latest.ModelConfig{Provider: "anthropic", Model: "claude-fable-5"},
 		ModelOptions: optionsFromStore(store),
 	}}
 	assert.Equal(t, int64(1_000_000), fable.contextLimit(t.Context()))
 
-	// No store configured: default Claude window.
+	// No store configured: conservative Claude window.
 	noStore := &Client{Config: base.Config{
 		ModelConfig: latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-4-5"},
 	}}

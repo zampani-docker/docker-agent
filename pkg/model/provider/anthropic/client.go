@@ -800,10 +800,11 @@ func contentArray(m map[string]any) []any {
 }
 
 // contextLimit returns the context window for this client's model, sourced
-// from models.dev when available and falling back to the model family's
-// standard Claude window otherwise.
+// from models.dev (including the embedded snapshot) when available, and
+// falling back to the conservative 200k Claude floor only when no catalogue
+// entry exists.
 func (c *Client) contextLimit(ctx context.Context) int64 {
-	return modelinfo.ContextLimit(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), modelinfo.DefaultClaudeContextLimit(c.ModelConfig.Model))
+	return modelinfo.ContextLimit(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), modelinfo.DefaultAnthropicContextLimit)
 }
 
 // clampMaxTokens returns the effective max_tokens value after capping to the
