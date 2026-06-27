@@ -31,6 +31,7 @@ var cops = []cop.Cop{
 	SlogContextual,
 	ConstructorPurity,
 	ConstructorCommandExec,
+	ConstructorNetworkIO,
 }
 
 func main() {
