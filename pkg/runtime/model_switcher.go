@@ -819,6 +819,10 @@ func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest
 		}
 	}
 
+	if store, ok := r.modelsStore.(*modelsdev.Store); ok && store != nil {
+		opts = append(opts, options.WithModelsDevStore(store))
+	}
+
 	registry := r.modelSwitcherCfg.ProviderRegistry
 	if registry == nil {
 		registry = r.providerRegistry

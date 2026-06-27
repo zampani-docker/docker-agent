@@ -14,7 +14,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -264,7 +263,9 @@ func (d *modelPickerDialog) handleSelection() tea.Cmd {
 }
 
 // validateCustomModelSpec validates a custom model specification entered by the user.
-// It checks that each provider/model pair is properly formatted and uses a supported provider.
+// It checks that each provider/model pair is syntactically valid. Provider
+// existence is resolved by the runtime because configs may define custom
+// providers that the TUI cannot see here.
 func validateCustomModelSpec(spec string) error {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -292,11 +293,6 @@ func validateCustomModelSpec(spec string) error {
 		}
 		if modelName == "" {
 			return fmt.Errorf("model name cannot be empty (got '%s/')", providerName)
-		}
-
-		if !provider.IsKnownProvider(providerName) {
-			return fmt.Errorf("unknown provider '%s'. Supported: %s",
-				providerName, strings.Join(provider.AllProviders(), ", "))
 		}
 	}
 

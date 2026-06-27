@@ -70,6 +70,9 @@ func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
 		}
 
 		ids, err := r.dmrModelLister(ctx)
+		if err != nil && ctx.Err() != nil {
+			return ids, err
+		}
 		c.mu.Lock()
 		c.ids, c.err, c.fetchedAt = ids, err, now()
 		c.mu.Unlock()

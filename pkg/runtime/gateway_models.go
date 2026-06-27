@@ -69,6 +69,9 @@ func (r *LocalRuntime) listGatewayModels(ctx context.Context) ([]string, error) 
 		}
 
 		ids, err := modelsgateway.ListModels(ctx, r.modelSwitcherCfg.ModelsGateway, r.modelSwitcherCfg.EnvProvider)
+		if err != nil && ctx.Err() != nil {
+			return ids, err
+		}
 		c.mu.Lock()
 		c.ids, c.err, c.fetchedAt = ids, err, now()
 		c.mu.Unlock()
