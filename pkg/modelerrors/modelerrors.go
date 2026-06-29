@@ -641,11 +641,11 @@ func FormatError(err error) string {
 	}
 
 	if IsStreamTruncationError(err) {
-		return "The connection to the model closed before it produced any output. " +
-			"With local models (e.g. Docker Model Runner), this usually means a large prompt's prefill " +
-			"exceeded an idle or connection timeout in the model server, or in a proxy in front of it, " +
-			"before the first token was streamed. Try a shorter prompt, or raise the model server's " +
-			"idle/keep-alive timeout."
+		return "The connection to the model was closed unexpectedly before it completed its response. " +
+			"With local models (e.g. Docker Model Runner), this can happen when an idle or " +
+			"connection timeout in the model server (or a proxy in front of it) drops a silent " +
+			"prefill before the first token, or cuts a long response mid-stream. " +
+			"Try a shorter prompt, or raise the model server's idle/keep-alive timeout."
 	}
 
 	return err.Error()

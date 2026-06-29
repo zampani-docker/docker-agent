@@ -516,8 +516,11 @@ func TestFormatError(t *testing.T) {
 		t.Parallel()
 		err := fmt.Errorf("error receiving from stream: %w", errors.New("unexpected end of JSON input"))
 		msg := FormatError(err)
-		assert.Contains(t, msg, "closed before it produced any output")
+		assert.Contains(t, msg, "closed unexpectedly before it completed its response")
+		// Covers both the silent-prefill drop and a mid-stream cut, since the
+		// truncation patterns can fire after partial tokens have streamed too.
 		assert.Contains(t, msg, "prefill")
+		assert.Contains(t, msg, "mid-stream")
 		assert.NotContains(t, msg, "unexpected end of JSON input")
 	})
 
