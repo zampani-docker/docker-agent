@@ -70,8 +70,15 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	// done is closed when handleStream exits (for any reason) so the reader
 	// goroutine below can detect it and stop trying to send on recvCh.
 	done := make(chan struct{})
-	defer close(done)
-	defer stream.Close()
+	// Close done BEFORE closing the stream. stream.Close() unblocks a parked
+	// stream.Recv() with a cleanup error (e.g. "http2: response body closed").
+	// If done were still open at that moment, the reader goroutine could buffer
+	// that cleanup artifact into recvCh, masking the real exit cause. Closing
+	// done first guarantees the goroutine takes its <-done exit branch instead.
+	defer func() {
+		close(done)
+		stream.Close()
+	}()
 
 	type recvResult struct {
 		response chat.MessageStreamResponse
