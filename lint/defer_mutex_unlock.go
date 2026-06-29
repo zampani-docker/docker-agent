@@ -128,7 +128,16 @@ func isSafeManualUnlockAtEnd(stmts []ast.Stmt, lockIdx int, lock mutexCall) bool
 			return false
 		}
 		name, recv, ok := selectorCallStmt(stmts[i])
-		if !ok || recv != lock.recv {
+		if !ok {
+			// Compound statement (if/for/switch/...): a nested lock or unlock of
+			// the same mutex means the terminal unlock is not the sole release,
+			// so deferring it would change behavior.
+			if stmtContainsLockOp(stmts[i], lock) {
+				return false
+			}
+			continue
+		}
+		if recv != lock.recv {
 			continue
 		}
 		switch name {
@@ -155,6 +164,32 @@ func isSafeManualUnlockAtEnd(stmts []ast.Stmt, lockIdx int, lock mutexCall) bool
 		return false
 	}
 	return returnResultsAreSideEffectFree(ret)
+}
+
+func stmtContainsLockOp(stmt ast.Stmt, lock mutexCall) bool {
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if selectorReceiver(sel.X) != lock.recv {
+			return true
+		}
+		switch sel.Sel.Name {
+		case lock.method, lock.unlockMethod():
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 func stmtContainsDefer(stmt ast.Stmt) bool {
