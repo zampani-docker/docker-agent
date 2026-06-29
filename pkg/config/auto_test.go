@@ -343,7 +343,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 
 		modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(map[string]string{
 			"OPENCODE_API_KEY": "test-key",
-		}), &latest.ModelConfig{Provider: "opencode-go", Model: DefaultModels["opencode-go"]})
+		}), &latest.ModelConfig{Provider: "opencode-go", Model: DefaultModels["opencode-go"]}, nil)
 
 		assert.Equal(t, "opencode-go", modelConfig.Provider)
 		assert.Equal(t, DefaultModels["opencode-go"], modelConfig.Model)
