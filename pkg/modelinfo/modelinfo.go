@@ -84,10 +84,11 @@ func AlwaysReasons(modelID string) bool {
 	return isOSeries(normalize(modelID))
 }
 
-// claudeOpus46To48Prefixes lists the bare Claude Opus model families that share
-// two behaviors: they reject token-based thinking ([RejectsTokenThinking]) and
-// expose a 1M-token context window ([DefaultClaudeContextLimit]). Kept in one
-// place so a new affected Opus version is added to both predicates at once.
+// claudeOpus46To48Prefixes lists the bare Claude Opus model families that
+// reject token-based thinking ([RejectsTokenThinking]) and instead require
+// adaptive thinking. This is an API behavior quirk that models.dev does not
+// describe, so it stays hard-coded here (unlike context windows, which come
+// from the catalogue).
 var claudeOpus46To48Prefixes = []string{"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
 
 // isClaudeOpus46To48 reports whether modelID names a Claude Opus 4.6, 4.7 or
@@ -274,36 +275,16 @@ func (mc ModelCapabilities) Supports(mimeType string) bool {
 // loadCapsTimeout is the maximum time allowed for a models.dev capability lookup.
 const loadCapsTimeout = 10 * time.Second
 
-// DefaultAnthropicContextLimit is the context window assumed for most Claude
-// models when models.dev has no entry for them. Claude 3.5 through 4.x all
-// expose a 200k-token window, so it is a safe floor for clamping retries.
-// Prefer [DefaultClaudeContextLimit], which special-cases newer families with
-// larger windows.
-const DefaultAnthropicContextLimit = 200000
-
-// DefaultClaudeContextLimit returns the context window assumed for a Claude
-// model when models.dev has no entry for it — typically a model released
-// before the catalogue caught up. The Claude Fable family and the Claude
-// Opus 4.6, 4.7 and 4.8 families expose a 1M-token window; everything else
-// falls back to the standard 200k floor.
+// DefaultAnthropicContextLimit is the context window assumed for a Claude
+// model only when models.dev has no entry for it AND no store is available —
+// a degenerate, last-resort case. Claude 3.5 through 4.x all expose at least a
+// 200k-token window, so it is a safe conservative floor for clamping retries.
 //
-// Bedrock-style identifiers such as "global.anthropic.claude-opus-4-8" are
-// recognised too.
-func DefaultClaudeContextLimit(modelID string) int64 {
-	m := normalize(modelID)
-	if bare, ok := bedrockClaudeModelName(m); ok {
-		m = bare
-	}
-	if m == "claude-fable" || strings.HasPrefix(m, "claude-fable-") {
-		return 1_000_000
-	}
-	// Claude Opus 4.6, 4.7 and 4.8 ship with a 1M-token window across the
-	// API, Bedrock and Vertex AI; only older Opus families use the 200k floor.
-	if isClaudeOpus46To48(m) {
-		return 1_000_000
-	}
-	return DefaultAnthropicContextLimit
-}
+// Model-specific windows (e.g. the 1M window of Claude Fable and Opus 4.6+)
+// are NOT special-cased here: they come from the embedded models.dev snapshot,
+// which is always available (even offline) and refreshed at build time. See
+// [ContextLimit].
+const DefaultAnthropicContextLimit = 200000
 
 // ContextLimit returns the context-window size (in tokens) for a model.
 //
