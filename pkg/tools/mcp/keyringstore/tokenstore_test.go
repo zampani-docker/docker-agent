@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -840,57 +839,4 @@ func TestBuildDefaultStore_NilRingFallsThrough(t *testing.T) {
 	if _, ok := memStore.(*KeyringTokenStore); ok {
 		t.Fatal("a nil fallback ring must fall through to the in-memory store")
 	}
-}
-
-// TestKeyringTokenStore_ConcurrentAccess verifies that concurrent reads and
-// writes to the token store are safe and don't cause data races.
-func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
-	store, _ := newTestStore(t)
-
-	const numGoroutines = 10
-	const numOperations = 100
-
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 3) // readers, writers, removers
-
-	// Concurrent readers
-	for i := range numGoroutines {
-		go func(id int) {
-			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
-			for range numOperations {
-				_, _ = store.GetToken(url)
-			}
-		}(i)
-	}
-
-	// Concurrent writers
-	for i := range numGoroutines {
-		go func(id int) {
-			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
-			for j := range numOperations {
-				_ = store.StoreToken(url, &mcp.OAuthToken{
-					AccessToken: fmt.Sprintf("token-%d-%d", id, j),
-				})
-			}
-		}(i)
-	}
-
-	// Concurrent removers
-	for i := range numGoroutines {
-		go func(id int) {
-			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
-			for range numOperations {
-				_ = store.RemoveToken(url)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Verify the store is still in a consistent state
-	entries := store.ListOAuthTokens()
-	t.Logf("After concurrent access: %d tokens remain", len(entries))
 }

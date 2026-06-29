@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"encoding/json"
-	"os"
 	stdruntime "runtime"
 	"sync/atomic"
 	"testing"
@@ -264,12 +263,9 @@ func TestAfterLLMCallHook_HarnessUsageWithoutCostIsUnpriced(t *testing.T) {
 
 	const hookName = "test-after-llm-harness-cost"
 
-	binDir := t.TempDir()
-	writeHarnessScript(t, binDir, "codex", `#!/bin/sh
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"harness done"}}'
-printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":30}}'
+	useHarnessShim(t, "codex", `{"type":"item.completed","item":{"type":"agent_message","text":"harness done"}}
+{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":30}}
 `)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var captured atomic.Pointer[hooks.Input]
 
