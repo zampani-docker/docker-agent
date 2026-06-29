@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -839,4 +840,52 @@ func TestBuildDefaultStore_NilRingFallsThrough(t *testing.T) {
 	if _, ok := memStore.(*KeyringTokenStore); ok {
 		t.Fatal("a nil fallback ring must fall through to the in-memory store")
 	}
+}
+
+// TestKeyringTokenStore_ConcurrentAccess guards the store's thread-safety
+// contract: its mutex protects the cache/key/loaded fields against
+// concurrent GetToken/StoreToken/RemoveToken calls. The op count is kept
+// small on purpose — the race detector flags an unsynchronised access on
+// the first overlapping pair, so a few overlapping iterations exercise the
+// contract just as well as thousands while keeping the test fast. Run under
+// -race for it to be meaningful.
+func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	const numGoroutines = 3
+	const numOperations = 10
+
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines * 3) // readers, writers, removers
+
+	for i := range numGoroutines {
+		go func(id int) {
+			defer wg.Done()
+			url := fmt.Sprintf("https://server-%d.example/mcp", id)
+			for range numOperations {
+				_, _ = store.GetToken(url)
+			}
+		}(i)
+		go func(id int) {
+			defer wg.Done()
+			url := fmt.Sprintf("https://server-%d.example/mcp", id)
+			for j := range numOperations {
+				_ = store.StoreToken(url, &mcp.OAuthToken{
+					AccessToken: fmt.Sprintf("token-%d-%d", id, j),
+				})
+			}
+		}(i)
+		go func(id int) {
+			defer wg.Done()
+			url := fmt.Sprintf("https://server-%d.example/mcp", id)
+			for range numOperations {
+				_ = store.RemoveToken(url)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// The store must still be usable after the concurrent churn.
+	_ = store.ListOAuthTokens()
 }
